@@ -219,7 +219,7 @@ variable long ovr_hb_ns = 0;
 //declare functions
 function read_all;
 function write_all;
-option extra_setup yes;
+option post_export yes;
 
 ;;
 
@@ -247,8 +247,9 @@ option extra_setup yes;
 #define OPMODE_NONE 0
 #define OPMODE_PROFILE_POSITION 1
 
-EXTRA_SETUP ()  {
-  // initialize variables
+POST_EXPORT() {
+  // 2.10 halcompile: extra_setup runs before pins/params exist (halcompile.g:507) --
+  // writing params there was UB and gcc folded export() into ud2; post_export runs after.
   pos_scale_set(1.0);
   pos_scale_old = pos_scale + 1.0;
   pos_scale_rcpt = 1.0;
