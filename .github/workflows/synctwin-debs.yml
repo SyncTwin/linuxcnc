@@ -1,0 +1,65 @@
+name: SyncTwin debs (trixie)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'synctwin/**'
+
+jobs:
+  debs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    container:
+      image: debian:trixie
+    steps:
+    - name: Install pre-dependencies
+      run: |
+        set -x
+        apt-get -q update
+        apt-get --yes upgrade
+        apt-get --yes --no-install-recommends install \
+          ca-certificates git lsb-release python3 devscripts equivs
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        submodules: false
+        # the build system derives the version from tags
+        fetch-depth: 0
+    - name: Git config
+      run: git config --global --add safe.directory "$PWD"
+    - name: Configure
+      run: |
+        set -x
+        debian/configure
+        # keep debian/changelog (2.10.0~pre2+synctwinN): no update-dch-from-git
+        scripts/get-version-from-git | sed -re 's/^v(.*)$/\1/' >| VERSION
+        cat VERSION
+        dpkg-parsechangelog -S Version
+    - name: Install build dependencies
+      run: |
+        set -x
+        mk-build-deps --install --remove \
+          --tool 'apt-get --yes --no-install-recommends' debian/control
+    - name: Build packages
+      run: |
+        set -x
+        dpkg-buildpackage -b -uc -us -j"$(nproc)"
+    - name: Check python3 dependency
+      run: |
+        set -x
+        deb=$(ls ../linuxcnc-uspace_*.deb)
+        dpkg-deb -f "$deb" Version Depends | tee /dev/stderr | grep -E 'python3 \(<< 3\.14\)'
+    - name: Collect .deb
+      run: |
+        set -x
+        mkdir -p artifacts
+        cp -v ../*.deb ../*.buildinfo ../*.changes artifacts/ || true
+        (cd artifacts && sha256sum * > SHA256SUMS.txt)
+        ls -la artifacts
+    - name: Upload .deb
+      uses: actions/upload-artifact@v7
+      with:
+        name: linuxcnc-synctwin-trixie-amd64
+        path: artifacts
+        if-no-files-found: error

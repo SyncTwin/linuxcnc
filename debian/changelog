@@ -1,3 +1,11 @@
+linuxcnc (1:2.10.0~pre2+synctwin2) trixie; urgency=medium
+
+  * SyncTwin build for Debian 13 trixie (python3 3.13).
+  * Based on synctwin/2.10: cia402, trigwin, palletkins, HOME_DELAY before
+    final home move, M62-M68 range check.
+
+ -- SyncTwin CI <ci@synctwin.invalid>  Sat, 03 Oct 2026 19:30:00 +0000
+
 linuxcnc (1:2.10.0~pre2) UNRELEASED; urgency=medium
 
   [ Andy Pugh]
