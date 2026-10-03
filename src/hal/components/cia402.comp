@@ -1,0 +1,694 @@
+component cia402 "HAL CiA402 Drive interface layer";
+//
+//    Copyright (C) 2019 Dominik Braun <dominik.braun@eventor.de>
+//
+//    This program is free software; you can redistribute it and/or modify
+//    it under the terms of the GNU General Public License as published by
+//    the Free Software Foundation; either version 2 of the License, or
+//    (at your option) any later version.
+//
+//    This program is distributed in the hope that it will be useful,
+//    but WITHOUT ANY WARRANTY; without even the implied warranty of
+//    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//    GNU General Public License for more details.
+//
+//    You should have received a copy of the GNU General Public License
+//    along with this program; if not, write to the Free Software
+//    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301 USA
+//
+author "Dominik Braun";
+license "GPL";
+
+description """
+HAL Interface for CiA402 Devices,
+
+this component acts as a glue layer between hardware to Hal modules like Ethercat, CAN-Bus or others.\n
+It translates raw IO Data from the PDOs to the common linuxcnc Hal pin structure and has build in logic\n
+ 
+for the CiA402 State Control, feedback handling, external homing and build in scaling functions.\n
+
+It delivers two functions: read_all and write_all.\n
+The concept of integration in the correspondending task should be as following: \n
+
+
+
+###################      ###########       #########     ############      #####################\n
+#HARDWARE INPUT   #      # CiA402  #       #Motion #     #  CiA402  #      #  Hardware Output  #\n
+#  like           #-->>--#read_all #-->>>--#Pids   #-->--#write_all #-->>--#        like       #\n
+#Ethercat read_all#      #  etc.   #       #       #     #          #      # Ethercat write_all#\n
+###################      ###########       #########     ############      #####################\n
+\n
+Hal Example:\n
+
+#########\n
+# Setup\n
+#########\n
+
+
+loadrt [KINS]KINEMATICS\n
+loadrt [EMCMOT]EMCMOT servo_period_nsec=[EMCMOT]SERVO_PERIOD num_joints=[KINS]JOINTS\n
+(loadusr -W lcec_conf ethercat-conf.xml)\n
+loadrt lcec\n
+loadrt cia402 count=3\n
+loadrt pid names=x-pid,y-pid,z-pid\n
+
+##########################\n
+# Functions servo-thread\n
+##########################\n
+addf lcec.read-all servo-thread\n
+addf cia402.0.read-all servo-thread\n
+addf cia402.1.read-all servo-thread\n
+addf cia402.2.read-all servo-thread\n
+
+addf motion/ PIDs / PCL / etc .\n
+
+addf cia402.0.write-all servo-thread\n
+addf cia402.1.write-all servo-thread\n
+addf cia402.2.write-all servo-thread\n
+addf lcec.write-all servo-thread\n
+#########################################\n
+#nets .....\n
+
+By default the component is set to CSP Mode,\n
+CSV Mode could be selected with an:\n 
+setp cia402.0.csp-mode 0  in hal.\n
+Mode changing in runtime is currently not supported, to avoid\n
+unwanted behaviour.\n 
+
+For using the servo drives internal homing procedure configure your\n
+joint homing to  Home on Index Pulse only and connect the components\n
+home Input to the index-enable Pin:\n
+
+HOME_SEARCH_VEL = 0.0\n
+HOME_LATCH_VEL = 0.2  (Any value but zero, the homing speed is predetermined by the drives configured speed\n
+HOME_USE_INDEX = TRUE\n
+
+If you are using PIDs, don't forget to connect the PIDs index-enable pin.\n
+
+
+Even though this component exports many pins, you can choose which functions you want to use:\n
+
+If you would like to use the CiA State Machine, connect Statusword and Controlword.\n
+For single use of the scaling function connect only the fb and cmd pins from position or velocity.\n
+If no Drives homing is needed, let the Pins unconnected.""";
+
+//CiA IOs
+//inputs from drive
+pin in unsigned statusword        "Drives CiA402 Statusword, index 0x6041";
+pin in signed opmode_display      "Drives Modes of Operation feedback register, index 0x6061"; 
+pin in signed drv_actual_position "Drives actual Position, index 0x6064";
+pin in signed drv_actual_velocity "Drives actual Velocity, index 0x606C";
+//outputs to drive
+pin out unsigned controlword    "Drives CIA402 Controlword, index 0x6040";
+pin out signed opmode           "Drives Modes of Operation Input, index 0x6060";
+pin out signed drv_target_position  "Position command to the drive, index 0x607A";
+pin out signed drv_target_velocity  "Velocity command to the drive, index 0x60FF";
+pin out signed drv_target_torque "0x6071, per mille of rated torque (CiA 402 unit); driven only while ovr-active (from ovr-torque-cmd), 0 otherwise";
+
+//Control IOs
+pin in bit enable     "true enables the Drive";
+pin in float pos_cmd  "target Position, from Motion or PID";
+pin in float velocity_cmd "target Velocity, from Motion or PID";
+
+pin out float pos_fb      "Position feedback, scaled";
+pin out float velocity_fb "Velocity feedback scaled";
+pin out bit drv_fault     "true indicates an Drive Error";
+
+//Homing IOs
+pin io bit home         "true starts the Drives internal home procedure, connect this to joint.x.index-enable pin";
+pin out bit stat_homed  "true indicates that the Drive is internaly homed";
+pin out bit stat_homing "true indicates that the Drives homing procedure is running";
+//Auxilary IOs
+pin out bit stat_switchon_ready   "Drive in CiA State: ready to switch on";
+pin out bit stat_switched_on      "Drive in CiA State: switched on";
+pin out bit stat_op_enabled       "Drive in CiA State: Operation enabled";
+pin out bit stat_voltage_enabled  "Drive in CiA State: switched on, Voltage enabled";
+pin out bit stat_fault            "Drive hast the fault bit set";
+pin out bit stat_quick_stop       "Drive in CiA State: Quick stop active (statusword & 0x6F == 0x07)";
+pin out bit stat_switchon_disabled  "Drive in CiA State: Switch on disabled";
+pin out bit stat_warning          "Drive has the warning bit set";
+pin out bit stat_remote           "Drive in State remote / bus operation";
+pin out bit stat_target_reached   "Drive has reached target position / velocity";
+pin out bit opmode_no_mode        "Drive has no operation Mode set";
+pin out bit opmode_homing         "Drive in Mode Homing";
+pin out bit opmode_cyclic_position  "Drive in Mode Cyclic synchronus Position";
+pin out bit opmode_cyclic_velocity  "Drive in Mode Cyclic synchronus Velocity";
+
+pin in bit fault_reset  "true, sends fault reset command to the Drive";
+pin io bit soft_disable "Operator servo-off request (NEXT-28, owner 27.09): set to 1 BEFORE enable drops and the drop takes disable operation (402-2 transition 5, 0x605C); any other drop -- E-STOP, fault, machine off, or the pin left unconnected -- takes quick stop (transition 11, 0x605A/0x6085). Consumed (reset to 0) by the enable falling edge, so a stale request cannot soften a later emergency stop";
+
+// Mode acceptance (FOUND-1 row 6): 0x6061 must echo 0x6060.
+// Statusword bit 13, mode specific (FOUND-1 row 7).
+pin out bit stat_following_error "CSP (0x6061 = 8): statusword bit 13, following error; raises drv-fault";
+pin out bit stat_homing_error    "HM (0x6061 = 6): statusword bit 13, homing error; raises drv-fault";
+pin out bit quick_stop_incomplete "true: enable dropped in Operation enabled, the drive did not leave Quick stop active within quick-stop-timeout; disable voltage was sent anyway. Cleared by the next enable";
+pin out unsigned stop_trace "Latch of the stop path (NEXT-28): CiA 402 states the statusword passed through while enable was low, bit 0 not ready, 1 switch on disabled, 2 ready to switch on, 3 switched on, 4 operation enabled, 5 quick stop active, 6 fault reaction active, 7 fault; bit 8 disable operation sent (0x07), bit 9 quick stop sent (0x02). Cleared by the enable rising edge: after a stop it holds the whole path (quick stop from standstill = 0x232, disable operation = 0x11A) for a one-shot reader";
+pin out bit opmode_mismatch "true: 0x6061 (display) has differed from 0x6060 (commanded) longer than opmode-timeout while enabled; raises drv-fault";
+
+// Profile Position (CANOPEN-4, SyncTwin): used only with pp-mode = 1, inert otherwise.
+// The drive runs the profile; the set-point is pos-cmd (0x607A), handed over by the
+// new-set-point handshake (controlword bit 4 / statusword bit 12).
+pin in bit pp_execute     "pp-mode: rising edge hands pos-cmd to the drive as a new set-point (change immediately)";
+pin in bit pp_halt        "pp-mode: controlword bit 8 (halt) while true";
+pin in float pp_velocity  "pp-mode: profile velocity, machine units/s -> 0x6081 via velo-scale";
+pin in float pp_accel     "pp-mode: profile acceleration = deceleration, machine units/s^2 -> 0x6083/0x6084 via acc-scale";
+pin out unsigned drv_profile_velocity "Profile velocity to the drive, index 0x6081";
+pin out unsigned drv_profile_accel    "Profile acceleration to the drive, index 0x6083";
+pin out unsigned drv_profile_decel    "Profile deceleration to the drive, index 0x6084";
+pin out bit stat_setpoint_ack "pp-mode: statusword bit 12, set-point acknowledge";
+pin out bit pp_done "pp-mode: the last set-point is acknowledged and the target reached (or halted)";
+
+pin out signed cia_state "CiA 402 state decoded from the statusword (402-2 table 30), numbered as the stop-trace bits: 0 not ready, 1 switch on disabled, 2 ready to switch on, 3 switched on, 4 operation enabled, 5 quick stop active, 6 fault reaction active, 7 fault; -1 an undefined bit pattern";
+
+// Override -- «take the axis» (FOUND-1 CW-3, owner 27.09): commissioning over the
+// machine configuration while Machine is OFF, LinuxCNC stays up (the Siemens
+// Steuerhoheit / Beckhoff NC Online pattern). All pins unconnected = inert.
+pin in bit machine_on     "override: Machine ON (the print nets motion.motion-enabled); override is refused while it is high";
+pin in bit ovr_request    "override: rising edge takes the axis (only with machine-on = 0 and enable = 0); falling edge returns it through disable operation (transition 5)";
+pin in signed ovr_opmode  "override: 0x6060 while ovr-active -- 8 CSP, 9 CSV, 10 CST, 6 HM; anything else sets ovr-refused (at the request: not taken; while active: the last valid mode stays)";
+pin in bit ovr_enable     "override: the enable of the drive while ovr-active (machine enable is ignored)";
+pin in float ovr_pos_cmd      "override: CSP target, machine units -> 0x607A via pos-scale";
+pin in float ovr_velocity_cmd "override: CSV target, machine units/s -> 0x60FF via velo-scale";
+pin in float ovr_torque_cmd   "override: CST target, percent of rated torque -> 0x6071 per mille, saturated to +-32767";
+pin in u32 ovr_heartbeat  "override: sign of life of the owner; only a CHANGE of the value matters. Unchanged longer than ovr-hb-timeout -> quick stop (transition 11) and ovr-heartbeat-lost";
+pin out bit ovr_active    "override owns the drive: controlword, opmode and targets come from ovr-*. Stays true until the exit stop is over (drive out of Operation enabled)";
+pin out bit ovr_refused   "override: a request (or a mode) was refused -- machine on / enable high at the request, machine turned on while active, or ovr-opmode not in 8/9/10/6. Cleared by the next ovr-request rising edge";
+pin out bit ovr_heartbeat_lost "override: left by heartbeat loss (quick stop). Latched until the next ovr-request rising edge";
+
+//parameters
+param rw float pos_scale    "increments per machine unit";
+param rw float velo_scale   "velocity in machine units per 1 Motor revolution";
+param rw bit auto_fault_reset "true resets an actual Drive Fault automatically at the next enable Signal";
+param rw bit csp_mode "true= CS Position Mode, false= CS Velocity Mode, is only recognized at Linuxcnc Startup, default true";
+param rw bit pp_mode "true= Profile Position mode (0x6060 = 1) instead of csp-mode, default false";
+param rw float acc_scale "pp-mode: drive acceleration units per machine unit/s^2";
+param rw u32 opmode_timeout "ns the drive may take to echo a new 0x6060 in 0x6061 before opmode-mismatch (default 100 ms)";
+param rw u32 quick_stop_timeout "ns: upper bound of the quick-stop ramp after enable drops in Operation enabled; then disable voltage regardless (default 2 s). Also bounds disable operation (soft-disable), after which quick stop takes over -- ПРЕДПОЛОЖЕНИЕ, не замер: the 0x605C ramp (0x6084) is not printed, the 0x6085 bound stands in for it";
+param rw u32 ovr_hb_timeout "ns without a change of ovr-heartbeat before the override takes quick stop (default 1 s)";
+param rw signed velo_mode "0x6060 number of the velocity branch (csp-mode 0): 9 = CSV (EtherCAT, default), 3 = PV (CANopen spindle, drive ramps with 0x6083/0x6084)";
+param rw float units_per_rev "joint (machine) units per motor revolution, printed from the twin (enc_cpr x egear / pos-scale); 0 = not named. Not used by the component: the contract of the take-axis owner (reads it with getp), next to pos-scale";
+
+//internals
+variable float pos_scale_old;
+variable float velo_scale_old;
+variable bool  enable_old;       // effective enable (machine or override) of the previous period
+variable bool stat_homed_old;
+variable bool stat_fault_old;
+variable double pos_scale_rcpt;
+variable double velo_scale_rcpt;
+variable bool pos_mode;
+variable bool init_pos_mode = 0;
+variable long auto_fault_reset_delay;
+// Unwrapped actual position (IRON-estop 23.09). `long` is 64-bit on the
+// x86-64 stand, the same assumption `auto_fault_reset_delay` already makes.
+variable long fb_acc;
+variable long fb_last;
+variable bool fb_seeded = 0;
+variable int pp_state = 0;        // 0 idle, 1 set-point raised (bit 4), 2 acknowledged
+variable bool pp_execute_old = 0;
+variable long opmode_mismatch_ns = 0;
+variable int qs_phase = 0;        // 0 idle, 1 quick stop running, 2 finished: disable voltage until next enable, 3 disable operation running
+variable long qs_elapsed_ns = 0;
+variable bool soft_latched = 0;  // soft-disable taken at the enable falling edge
+variable bool ovr_request_old = 0;
+variable bool ovr_exiting = 0;    // override is stopping the drive before it hands it back
+variable int ovr_mode = 8;        // last valid ovr-opmode
+variable unsigned ovr_hb_old = 0;
+variable long ovr_hb_ns = 0;
+
+//declare functions
+function read_all;
+function write_all;
+option extra_setup yes;
+
+;;
+
+//constants
+#define FAULT_AUTORESET_DELAY_NS 100000000LL
+// ПРЕДПОЛОЖЕНИЕ, не замер: 100 ms for a drive to echo 0x6060 in 0x6061.
+// 402-2 / ETG.6010 set no time for the echo; the drive reports the mode it
+// actually runs. Cyclic drives switch within a few bus cycles, so 100 ms
+// (the same order as the fault-reset window above) only rules out a mode
+// the drive never takes. Tunable per instance via `opmode-timeout`.
+#define OPMODE_ACCEPT_TIMEOUT_NS 100000000U
+// ПРЕДПОЛОЖЕНИЕ, не замер: 2 s upper bound of the quick-stop ramp. 402-2 sets
+// no time; the ramp lasts v / 0x6085, i.e. 0.1-0.3 s on the mill (rapid
+// 100-500 mm/s at 1500 mm/s^2). 2 s only catches a drive that never answers
+// the quick stop (no 605A support, or 6085 not printed and the vendor default
+// slow). Tunable per instance via `quick-stop-timeout`.
+#define QUICK_STOP_TIMEOUT_NS 2000000000U
+// ПРЕДПОЛОЖЕНИЕ, не замер: 1 s, source pending (Siemens sign-of-life analogue).
+// Tunable per instance via `ovr-hb-timeout`.
+#define OVR_HEARTBEAT_TIMEOUT_NS 1000000000U
+#define OPMODE_CYCLIC_TORQUE 10
+#define OPMODE_CYCLIC_POSITION 8
+#define OPMODE_CYCLIC_VELOCITY 9
+#define OPMODE_HOMING 6
+#define OPMODE_NONE 0
+#define OPMODE_PROFILE_POSITION 1
+
+EXTRA_SETUP ()  {
+  // initialize variables
+  pos_scale_set(1.0);
+  pos_scale_old = pos_scale + 1.0;
+  pos_scale_rcpt = 1.0;
+  velo_scale_set(1.0);
+  velo_scale_old = velo_scale + 1.0;
+  velo_scale_rcpt = 1.0;
+  auto_fault_reset_set(1);
+  csp_mode_set(1); 
+  pp_mode_set(0);
+  acc_scale_set(1.0);
+  velo_mode_set(OPMODE_CYCLIC_VELOCITY);
+  units_per_rev_set(0.0);
+  opmode_timeout_set(OPMODE_ACCEPT_TIMEOUT_NS);
+  quick_stop_timeout_set(QUICK_STOP_TIMEOUT_NS);
+  ovr_hb_timeout_set(OVR_HEARTBEAT_TIMEOUT_NS);
+  return 0;
+}
+
+// Returns the scale to keep (a near-zero scale is replaced by 1.0); the caller
+// writes it back through <param>_set() - HAL 2.10 has no pointer to the param.
+static double check_scales(double scale, float *scale_old, double *scale_rcpt) {
+  // check for change in scale value
+  if (scale != *scale_old) {
+    // scale value has changed, test and update it
+    if ((scale < 1e-20) && (scale > -1e-20)) {
+      // value too small, divide by zero is a bad thing
+      scale = 1.0;
+    }
+    // save new scale to detect future changes
+    *scale_old = scale;
+    // we actually want the reciprocal
+    *scale_rcpt = 1.0 / scale;
+  }
+  return scale;
+}
+  
+// CiA 402 state by 402-2 table 30 masks; the one decoder for cia-state and
+// stop-trace. The eight patterns are mutually exclusive; -1 = none matches.
+static int cia_state_of(unsigned sw) {
+  if ((sw & 0x4F) == 0x00) return 0;  // not ready to switch on
+  if ((sw & 0x4F) == 0x40) return 1;  // switch on disabled
+  if ((sw & 0x6F) == 0x21) return 2;  // ready to switch on
+  if ((sw & 0x6F) == 0x23) return 3;  // switched on
+  if ((sw & 0x6F) == 0x27) return 4;  // operation enabled
+  if ((sw & 0x6F) == 0x07) return 5;  // quick stop active
+  if ((sw & 0x4F) == 0x0F) return 6;  // fault reaction active
+  if ((sw & 0x4F) == 0x08) return 7;  // fault
+  return -1;
+}
+
+static int ovr_mode_valid(int m) {
+  return m == OPMODE_CYCLIC_POSITION || m == OPMODE_CYCLIC_VELOCITY
+      || m == OPMODE_CYCLIC_TORQUE || m == OPMODE_HOMING;
+}
+
+FUNCTION(read_all) {
+  // effective enable: the override owns the drive while active
+  int en = ovr_active ? (ovr_enable && !ovr_exiting) : enable;
+
+  // check for change in scale value
+  pos_scale_set(check_scales(pos_scale, &pos_scale_old, &pos_scale_rcpt));
+  velo_scale_set(check_scales(velo_scale, &velo_scale_old, &velo_scale_rcpt));
+
+  // read position feedback -- UNWRAPPED across the drive's int32 rollover.
+  //
+  // 0x6064 is a 32-bit counter: with a 2^23 encoder it spans +-256 motor
+  // turns, i.e. +-368.6 deg of a 250:1 robot joint. Measured 23.09 on
+  // vm-stand1 (KR16 07dd24a3, joint 4 = drive B): 0x6064 = 0x7FFFBD4F,
+  // 17k counts below the rollover. Homing in place put joint 0 right there,
+  // the holding jitter at enable crossed the edge, the raw value flipped by
+  // 2^32 counts (-737 deg), and LinuxCNC saw "joint 4 following error" +
+  // "Exceeded NEGATIVE soft limit" and dropped the machine out of ON --
+  // the program run was then refused. Canonical treatment (as hm2/encoder
+  // counters do): accumulate the modular delta, so pos-fb stays continuous.
+  // Until a real rollover happens fb_acc == drv_actual_position exactly.
+  if (!fb_seeded) {
+    fb_acc = drv_actual_position;
+    fb_last = drv_actual_position;
+    fb_seeded = 1;
+  } else {
+    fb_acc += (int32_t)((uint32_t)drv_actual_position - (uint32_t)fb_last);
+    fb_last = drv_actual_position;
+  }
+  pos_fb_set(((double)fb_acc) * pos_scale_rcpt);
+
+  // read velocity feedback
+  velocity_fb_set(((double)drv_actual_velocity) * velo_scale_rcpt);
+
+  // read Modes of Operation
+  opmode_no_mode_set((opmode_display == OPMODE_NONE));
+  opmode_homing_set((opmode_display == OPMODE_HOMING));
+  opmode_cyclic_velocity_set((opmode_display == OPMODE_CYCLIC_VELOCITY));
+  opmode_cyclic_position_set((opmode_display == OPMODE_CYCLIC_POSITION));
+ 
+  // read status
+  stat_switchon_ready_set((statusword >> 0) & 1);
+  stat_switched_on_set((statusword >> 1) & 1);
+  stat_op_enabled_set((statusword >> 2) & 1);
+  stat_fault_set((statusword >> 3) & 1);
+  stat_voltage_enabled_set((statusword >> 4) & 1);
+  // Bit 5 is "quick stop", ACTIVE LOW (402-2 statusword table): it reads 1 in
+  // every normal state and drops to 0 only in *Quick stop active*. The raw bit
+  // used to land here, so the pin said 1 exactly when there was NO quick stop.
+  // The pin now means what its name says: the state is Quick stop active
+  // (sw & 0x6F == 0x07), the same decoding `cnc_servo.cia402` uses.
+  stat_quick_stop_set(((statusword & 0x6F) == 0x07));
+  stat_switchon_disabled_set((statusword >> 6) & 1);
+  stat_warning_set((statusword >> 7) & 1);
+  stat_remote_set((statusword >> 9) & 1);
+  cia_state_set(cia_state_of(statusword));
+
+  // velo_mode 9 (default) makes the added term the same as opmode_cyclic_velocity
+  if (opmode_cyclic_position || opmode_cyclic_velocity
+      || (!pos_mode && opmode_display == velo_mode)
+      || (pp_mode && opmode_display == OPMODE_PROFILE_POSITION)) {
+    stat_target_reached_set((statusword >> 10) & 1);
+    } else {
+      stat_target_reached_set(0);
+    }
+
+  stat_setpoint_ack_set(pp_mode && ((statusword >> 12) & 1));
+
+  // Bit 13 means something only per mode (402-2): CSP -- following error,
+  // HM -- homing error; in CSV/PV/PP it is not read here. Either one means the
+  // axis is not where the command says, so both go to drv-fault.
+  stat_following_error_set(opmode_cyclic_position && ((statusword >> 13) & 1));
+  stat_homing_error_set(opmode_homing && ((statusword >> 13) & 1));
+
+  //home states  
+  if (opmode_homing) {
+    stat_homed_set(((statusword >> 10) & 1) && ((statusword >> 12) & 1));
+    stat_homing_set(!stat_homed && !((statusword >> 10) & 1));
+  }
+
+  // Mode acceptance: 0x6061 is the mode the drive RUNS, 0x6060 (`opmode`,
+  // written by write_all of the previous period) the one we asked for. Only
+  // judged while enabled with power on -- `opmode` is written from then on --
+  // and after `opmode-timeout` of continuous disagreement: a drive that does
+  // not take the mode is not following our set-points, which is a fault of
+  // the axis, not a state to wait out.
+  if (en && stat_voltage_enabled && opmode_display != opmode) {
+    if (opmode_mismatch_ns < (long)opmode_timeout) opmode_mismatch_ns += period;
+  } else {
+    opmode_mismatch_ns = 0;
+  }
+  opmode_mismatch_set(opmode_mismatch_ns >= (long)opmode_timeout);
+
+  // update fault output
+  if (auto_fault_reset_delay > 0) {
+    auto_fault_reset_delay -= period;
+    drv_fault_set(0);
+  } else {
+    drv_fault_set((stat_fault || opmode_mismatch
+                 || stat_following_error || stat_homing_error) && en);
+  }
+}
+
+FUNCTION(write_all) {
+  int enable_edge, enable_fall, drive_en;
+  int ovr_edge, ovr_exit = 0, ovr_exit_soft = 1;
+
+  //init opmode
+  if (!init_pos_mode) {
+    pos_mode = csp_mode;
+    init_pos_mode = 1;
+  }
+
+  // Override arbitration (FOUND-1 CW-3). Taken only with the machine off; while
+  // active the ovr-* pins stand in for enable / opmode / targets, and every
+  // stop below (quick stop, disable operation, stop trace, fault reset) runs
+  // on the effective enable unchanged. Exit = the enable falls through the
+  // existing stop paths: request dropped or machine turned on -> disable
+  // operation (transition 5), heartbeat lost -> quick stop (transition 11).
+  // The axis is handed back once the drive is out of Operation enabled; no
+  // re-seed of fb_acc, motion (off) keeps following pos-fb.
+  ovr_edge = ovr_request && !ovr_request_old;
+  ovr_request_old = ovr_request;
+  if (ovr_edge && !ovr_active) {
+    ovr_refused_set(0);
+    ovr_heartbeat_lost_set(0);
+    if (machine_on || enable || !ovr_mode_valid(ovr_opmode)) {
+      ovr_refused_set(1);
+    } else {
+      ovr_active_set(1);
+      ovr_exiting = 0;
+      ovr_mode = ovr_opmode;
+      ovr_hb_old = ovr_heartbeat;
+      ovr_hb_ns = 0;
+    }
+  }
+  if (ovr_active && !ovr_exiting) {
+    if (ovr_heartbeat != ovr_hb_old) {
+      ovr_hb_old = ovr_heartbeat;
+      ovr_hb_ns = 0;
+    } else if (ovr_hb_ns < (long)ovr_hb_timeout) {
+      ovr_hb_ns += period;
+    }
+    if (machine_on || enable) {
+      ovr_refused_set(1);                // second line: the print keeps motion.enable off
+      ovr_exit = 1;
+    } else if (!ovr_request) {
+      ovr_exit = 1;
+    } else if (ovr_hb_ns >= (long)ovr_hb_timeout) {
+      ovr_heartbeat_lost_set(1);
+      ovr_exit = 1;
+      ovr_exit_soft = 0;
+    }
+    if (ovr_mode_valid(ovr_opmode)) {
+      ovr_mode = ovr_opmode;          // switched on the fly via 0x6060 / 0x6061
+    } else {
+      ovr_refused_set(1);
+    }
+    if (ovr_exit) ovr_exiting = 1;
+  }
+
+  // detect enable edge (effective enable)
+  drive_en = ovr_active ? (ovr_enable && !ovr_exiting) : enable;
+  enable_edge = drive_en && !enable_old;
+  enable_fall = !drive_en && enable_old;
+  enable_old = drive_en;
+
+  // write control register.
+  //
+  // Idle word is 0x0000 -- *disable voltage*, the canonical CiA-402 command.
+  // It used to be 0x0004 (quick-stop bit alone): that matches disable voltage
+  // by the state-machine mask (bit1 = 0), and Inovance IS620N accepts it,
+  // dropping to statusword 0x0250 (switch-on disabled). A stricter decoder
+  // does not: measured 24.08 on Wecon VD3E (bench, bus in OP, LinuxCNC live)
+  // the drive stays in 0x0231 -- *ready to switch on*, power stage still fed --
+  // for as long as 0x0004 is held, and moves to 0x0250 the moment a bare
+  // 0x0000 arrives. So "the drive will not release" was really "we never
+  // issued the command". The quick-stop bit is raised again below, but only
+  // while `enable` is high, where the state machine actually needs it.
+  controlword_set(0); // idle: disable voltage
+
+  // Quick stop on disable (FOUND-1 row 2; 402-2 transition 11, IEC 60204-1
+  // stop category 1, SINAMICS OFF3). Dropping `enable` in Operation enabled
+  // used to send disable voltage at once (transition 9): the power stage went
+  // off and the axis coasted. Now the drive first gets controlword 0x02 (bit 1
+  // set, bit 2 = 0: Quick stop) and brakes by 0x605A / 0x6085; disable voltage
+  // follows once the drive has left Quick stop active by itself (our print
+  // writes 605A = 2, stop category 1: the drive ends the quick stop in Switch
+  // on disabled), or after quick-stop-timeout (-> quick-stop-incomplete).
+  // Statusword bit 10 is NOT a stop condition: measured 27.09 (FOUND-1, опыт 5,
+  // docs/drives/found1_live_after_2026_09_27.md) Inovance SV660 raises bit 10
+  // on the very first Quick stop active sample at 95 % speed; releasing on it
+  // sent 0x00 at 6.56 rev/s and the shaft coasted 0.226 rev. 605A = 5..8
+  // (stay in Quick stop) is never printed; a drive that stays is incomplete.
+  // Below Operation enabled nothing moves, so no quick stop; a Fault takes the
+  // fault path (the drive runs its own 605E reaction).
+  //
+  // Which stop is decided at the enable falling edge (owner 27.09, fail-safe):
+  // quick stop unless the agent asked for a soft switch-off. `soft-disable` = 1
+  // set BEFORE the drop (operator «servo off») takes disable operation
+  // (transition 5, controlword 0x07, the drive stops by 0x605C and lands in
+  // Switched on; our idle 0x00 then is transition 10). E-STOP, fault, machine
+  // off and anything that bypasses the agent take quick stop. The E-STOP chain
+  // is not read here: it reaches HAL through iocontrol (userspace) AFTER the
+  // enable drop -- measured 27.09, stop-trace 0x11A / 0x31A on E-STOP -- so a
+  // choice by it was a choice by a signal that had not arrived yet. The request
+  // is consumed at the edge, so a stale 1 cannot soften a later stop. Disable
+  // operation not left within quick-stop-timeout escalates to quick stop.
+  if (enable_fall) {
+    soft_latched = soft_disable;
+    soft_disable_set(0);
+  }
+  if (ovr_exit) {
+    if (enable_fall) soft_latched = ovr_exit_soft;
+    else if (!ovr_exit_soft && qs_phase == 3) {
+      qs_phase = 1;                   // heartbeat lost mid disable operation
+      qs_elapsed_ns = 0;
+    }
+  }
+  if (enable_edge || drive_en) {
+    if (enable_edge) quick_stop_incomplete_set(0);
+    qs_phase = 0;
+  } else if (stat_fault) {
+    qs_phase = 2;
+  } else if (qs_phase == 0 && (statusword & 0x6F) == 0x27) {
+    qs_phase = soft_latched ? 3 : 1;  // Operation enabled -> start the stop
+    qs_elapsed_ns = 0;
+  }
+  if (qs_phase == 3) {
+    if ((statusword & 0x6F) != 0x27) {
+      qs_phase = 2;                   // drive left Operation enabled (605C done)
+    } else if (qs_elapsed_ns >= (long)quick_stop_timeout) {
+      qs_phase = 1;                   // escalate: disable operation hung
+      qs_elapsed_ns = 0;
+    } else {
+      qs_elapsed_ns += period;
+      controlword_set(0x07);             // disable operation: bits 0-2, bit 3 = 0
+    }
+  }
+  if (qs_phase == 1) {
+    int in_qs = (statusword & 0x6F) == 0x07;
+    int in_oe = (statusword & 0x6F) == 0x27;
+    if (!in_qs && !in_oe) {
+      qs_phase = 2;                   // drive left the ramp by itself (605A = 2)
+    } else if (qs_elapsed_ns >= (long)quick_stop_timeout) {
+      qs_phase = 2;
+      quick_stop_incomplete_set(1);
+    } else {
+      qs_elapsed_ns += period;
+      controlword_set((1 << 1));         // 0x02: quick stop (bit 2 = 0), voltage enabled
+    }
+  }
+
+  // Stop trace (NEXT-28): the path out of Operation enabled lasts one ramp
+  // (tens of ms at standstill), far below any one-shot API read, so the
+  // states are latched here and read after the stop. 402-2 table 30 masks.
+  if (enable_edge) stop_trace_set(0);
+  if (!drive_en) {
+    int st = cia_state_of(statusword);
+    if (st >= 0) stop_trace_set(stop_trace | (1u << st));
+    if (controlword == 0x07) stop_trace_set(stop_trace | (1u << 8));
+    if (controlword == 0x02) stop_trace_set(stop_trace | (1u << 9));
+  }
+
+  if (stat_fault) {
+    home_set(0); 
+    if (fault_reset) {
+      controlword_set(controlword | ((1 << 7))); // fault reset
+    }
+    if (auto_fault_reset && enable_edge) {
+      auto_fault_reset_delay = FAULT_AUTORESET_DELAY_NS;
+      controlword_set(controlword | ((1 << 7))); // fault reset
+    }
+  } else {
+    if (drive_en) {
+      controlword_set(controlword | ((1 << 2))); // bit 2 = 1: no quick stop while enabled
+      controlword_set(controlword | ((1 << 1))); // enable voltage
+      if (stat_switchon_ready) {
+        controlword_set(controlword | ((1 << 0))); // switch on
+        if (stat_switched_on) {
+          controlword_set(controlword | ((1 << 3))); // enable op
+        }
+      }
+    }
+  }
+
+  // write position command -- modulo 2^32, the same wrap 0x6064 has.
+  // A bare `(int32_t)` of a double beyond INT32_MAX is undefined behaviour
+  // (x86 yields INT32_MIN: a 2^32-count jump of the target, a runaway on
+  // real mechanics). Going through 64-bit integer keeps the truncation
+  // the old line had and wraps the target together with the feedback.
+  if (!ovr_active) {
+    drv_target_position_set((int32_t)(uint32_t)(long)(pos_cmd * pos_scale));
+    // write velocity command
+    drv_target_velocity_set((int32_t) (velocity_cmd * velo_scale));
+    drv_target_torque_set(0);
+  } else {
+    double tq = ovr_torque_cmd * 10.0;  // percent -> per mille of rated torque (0x6076)
+    if (tq != tq) tq = 0.0;             // NaN
+    if (tq > 32767.0) tq = 32767.0;     // 0x6071 is INTEGER16
+    if (tq < -32767.0) tq = -32767.0;
+    // Bumpless enable: until Operation enabled the CSP target is the actual
+    // position, so an ovr-pos-cmd left at 0 cannot become a jump at switch-on.
+    if (stat_op_enabled) {
+      drv_target_position_set((int32_t)(uint32_t)(long)(ovr_pos_cmd * pos_scale));
+    } else {
+      drv_target_position_set(drv_actual_position);
+    }
+    drv_target_velocity_set((int32_t) (ovr_velocity_cmd * velo_scale));
+    drv_target_torque_set((int32_t) tq);
+  }
+
+  // reset home command   
+  if (home && (stat_homed && !stat_homed_old) && opmode_homing) {
+    home_set(0);
+  }
+  stat_homed_old = stat_homed;  
+
+  // OP Mode 
+  if (ovr_active) {
+    // Override: the mode is ovr-opmode; a change in Operation enabled is the
+    // plain 0x6060 write, judged by opmode-mismatch like any other. HM starts
+    // the drive's homing with a controlword bit 4 rising edge once the drive
+    // runs HM in Operation enabled (the machine `home` pin is not touched).
+    if (stat_voltage_enabled) opmode_set(ovr_mode);
+    if (ovr_mode == OPMODE_HOMING && stat_op_enabled && opmode_homing) {
+      controlword_set(controlword | ((1 << 4)));
+    }
+  } else if (pp_mode) {
+    // Profile Position: the drive plans the move. Default (pp-mode 0) takes
+    // the cyclic branch below, untouched.
+    int pp_edge = pp_execute && !pp_execute_old;
+    double pv = pp_velocity < 0 ? -pp_velocity : pp_velocity;
+    double pa = pp_accel < 0 ? -pp_accel : pp_accel;
+    pp_execute_old = pp_execute;
+    if (stat_voltage_enabled && !home) {
+      opmode_set(OPMODE_PROFILE_POSITION);
+    }
+    // velo-scale carries the axis sign (velocity-fb); 0x6081 is a magnitude
+    drv_profile_velocity_set((uint32_t)(pv * (velo_scale < 0 ? -velo_scale : velo_scale)));
+    drv_profile_accel_set((uint32_t)(pa * acc_scale));
+    drv_profile_decel_set(drv_profile_accel);
+    if (!stat_op_enabled || home) {
+      pp_state = 0;
+      pp_done_set(0);
+    } else {
+      if (pp_edge) {
+        pp_state = 1;
+        pp_done_set(0);
+      }
+      if (pp_state == 1) {
+        controlword_set(controlword | ((1 << 5)));                      // change set immediately (mcAborting)
+        if (opmode_display == OPMODE_PROFILE_POSITION) {
+          controlword_set(controlword | ((1 << 4)));                    // new set-point
+          if (stat_setpoint_ack) pp_state = 2;        // drop bit 4 from the next period
+        }
+      } else if (pp_state == 2) {
+        controlword_set(controlword | ((1 << 5)));
+        if (!stat_setpoint_ack && stat_target_reached) pp_done_set(1);
+      }
+      if (pp_halt) controlword_set(controlword | ((1 << 8)));           // halt: decelerate with 0x6084
+    }
+  } else {
+  // set to position mode 
+  if (stat_voltage_enabled && !home ) {
+    opmode_set(OPMODE_CYCLIC_POSITION);
+  }
+  // set velo mode: CSV (9) by default, PV (3) for a CANopen spindle (CANOPEN-7).
+  // PV takes 0x60FF like CSV; the drive ramps it with 0x6083/0x6084, set on the
+  // transport by the printer (drv-profile-* stay pp-mode only).
+  if (stat_voltage_enabled && !pos_mode && !home) {
+    opmode_set(velo_mode);
+  }
+  }
+  // mode Home and start homing
+  if (home && !ovr_active) {
+    opmode_set(OPMODE_HOMING);
+    controlword_set(controlword | ((home << 4)));  
+  }
+
+  // Hand the axis back once the exit stop is over (drive out of Operation
+  // enabled, no stop phase running). The machine takes over next period.
+  if (ovr_exiting && qs_phase != 1 && qs_phase != 3
+      && (statusword & 0x6F) != 0x27) {
+    ovr_active_set(0);
+    ovr_exiting = 0;
+  }
+}
+
