@@ -1213,6 +1213,9 @@ scarakins-objs += emc/kinematics/kins_util.o
 scarakins-objs += emc/kinematics/switchkins.o
 scarakins-objs += $(USERKFUNCS)
 
+obj-m += palletkins.o
+palletkins-objs := emc/kinematics/palletkins.o
+
 obj-m += pumakins.o
 pumakins-objs := emc/kinematics/pumakins.o
 pumakins-objs += libposemath/_posemath.o
@@ -1436,6 +1439,7 @@ endif
 ../rtlib/xyzac-trt-kins$(MODULE_EXT): $(addprefix objects/rt,$(xyzac-trt-kins-objs))
 ../rtlib/xyzbc-trt-kins$(MODULE_EXT): $(addprefix objects/rt,$(xyzbc-trt-kins-objs))
 ../rtlib/scarakins$(MODULE_EXT):      $(addprefix objects/rt,$(scarakins-objs))
+../rtlib/palletkins$(MODULE_EXT):     $(addprefix objects/rt,$(palletkins-objs))
 ../rtlib/pumakins$(MODULE_EXT):       $(addprefix objects/rt,$(pumakins-objs))
 ../rtlib/three21kins$(MODULE_EXT):     $(addprefix objects/rt,$(three21kins-objs))
 #----------------------------------------------------------------
