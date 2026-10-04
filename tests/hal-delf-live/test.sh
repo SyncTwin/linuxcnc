@@ -16,7 +16,7 @@ HAL="$TMPDIR/loop.hal"
     echo "loadrt siggen"
     echo "addf siggen.0.update t"
     echo "start"
-    for i in $(seq "$N"); do
+    for _ in $(seq "$N"); do
         echo "loadrt delfvictim names=v"
         echo "addf v t"
         echo "loadusr -w sleep 0.002"
