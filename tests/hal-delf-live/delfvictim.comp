@@ -1,0 +1,12 @@
+component delfvictim "Test component for tests/hal-delf-live: burns spin_ns in its function";
+
+pin out u32 calls;
+param rw u32 spin_ns = 20000;
+
+function _ nofp;
+license "GPL";
+author "SyncTwin";
+;;
+long long t0 = rtapi_get_time();
+calls++;
+while (rtapi_get_time() - t0 < (long long)spin_ns) { }
