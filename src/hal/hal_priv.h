@@ -118,7 +118,7 @@
 */
 
 #define HAL_KEY   0x48414C32	/* key used to open HAL shared memory */
-#define HAL_VER   0x00000010	/* version code */
+#define HAL_VER   0x00000011	/* version code */
 #define HAL_SIZE  (256*4096)
 #define HAL_PSEUDO_COMP_PREFIX "__" /* prefix to identify a pseudo component */
 
@@ -395,6 +395,7 @@ struct hal_thread_t {
     hal_list_t funct_list;	/* list of functions to run */
     char name[HAL_NAME_LEN + 1];	/* thread name */
     int comp_id;
+    unsigned int beatcnt;	/* completed passes, see thread_wait_quiescent() */
 };
 
 /***********************************************************************
