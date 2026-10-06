@@ -37,8 +37,17 @@ def edge(pin):
     return g("command-id")
 
 
+def beat(n=2):
+    """Wait until the thread has run n more times (one full pass at n=2)."""
+    b = hal.get_p("t.threadbeat")
+    wait(lambda: hal.get_p("t.threadbeat") - b >= n)
+
+
 def release(pin):
+    """Drop a command input and let the axis see it low, so that the next
+    edge on it is a new edge."""
     s(pin, 0)
+    beat()
 
 
 def move(mode, position=0.0, velocity=50.0):
