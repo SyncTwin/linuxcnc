@@ -148,8 +148,8 @@ pin in real velocity "velocity limit of the move; in velocity mode the signed ta
 pin in real acceleration "acceleration of the move (|v| rising), capped by maxa; 0 = maxa (axis default)";
 pin in real deceleration "deceleration of the move (|v| falling), capped by maxa; 0 = acceleration";
 pin in real jerk "jerk limit of the move; 0 = none (trapezoid), > 0 = S-curve (velocity moves only)";
-pin in s32 mode "0 absolute, 1 relative, 2 velocity (set-position: 0 absolute, 1 relative)";
-pin in s32 buffer_mode "index in BUFFER_MODES; only 0 (mcAborting) implemented";
+pin in sint mode "0 absolute, 1 relative, 2 velocity (set-position: 0 absolute, 1 relative)";
+pin in sint buffer_mode "index in BUFFER_MODES; only 0 (mcAborting) implemented";
 
 // ---- limits, as in [JOINT_n] of a machine config
 pin in real min_limit "soft limit low, [JOINT_n]MIN_LIMIT";
@@ -164,10 +164,10 @@ pin in bool stat_op_enabled "cia402.N.stat-op-enabled";
 pin in bool drv_fault "cia402.N.drv-fault";
 pin in bool stat_homed "cia402.N.stat-homed";
 pin in real pos_fb "cia402.N.pos-fb";
-pin in s32 drv_torque "drive actual torque 0x6077 (per mille of rated), raw from the bus";
+pin in sint drv_torque "drive actual torque 0x6077 (per mille of rated), raw from the bus";
 pin in real drv_velocity "cia402.N.velocity-fb (machine units/s)";
-pin in u32 drv_statusword "drive statusword 0x6041, raw from the bus";
-pin in u32 drive_error "drive error code 0x603F as read, 0 = no fault (passed through for the caller, not interpreted)";
+pin in uint drv_statusword "drive statusword 0x6041, raw from the bus";
+pin in uint drive_error "drive error code 0x603F as read, 0 = no fault (passed through for the caller, not interpreted)";
 
 // ---- to the drive (e.g. cia402)
 pin out real pos_cmd "to cia402.N.pos-cmd";
@@ -185,24 +185,24 @@ pin out real move_velocity "to cia402.N.pp-velocity";
 pin out real move_acceleration "to cia402.N.pp-accel";
 
 // ---- status (PLCopen FB outputs)
-pin out s32 state "AxisState code";
+pin out sint state "AxisState code";
 pin out bool busy;
 pin out bool done;
 pin out bool active;
 pin out bool command_aborted;
 pin out bool in_velocity "velocity mode reached its target velocity";
 pin out bool error;
-pin out s32 error_id "outcome of the newest command: refusal code, else the ErrorStop reason";
-pin out s32 axis_error_id "MC_ReadAxisError: why the axis is in ErrorStop, 0 outside it";
-pin out u32 command_id "number of the newest command (rising edge of execute/halt/stop/reset/home); busy/done/error/command-aborted/error-id belong to it";
-pin out u32 done_id "number of the last command that completed (Done)";
-pin out u32 aborted_id "number of the last command aborted by another command or by power-off (CommandAborted)";
-pin out u32 failed_id "number of the last command refused or ended by an axis error (Error)";
+pin out sint error_id "outcome of the newest command: refusal code, else the ErrorStop reason";
+pin out sint axis_error_id "MC_ReadAxisError: why the axis is in ErrorStop, 0 outside it";
+pin out uint command_id "number of the newest command (rising edge of execute/halt/stop/reset/home); busy/done/error/command-aborted/error-id belong to it";
+pin out uint done_id "number of the last command that completed (Done)";
+pin out uint aborted_id "number of the last command aborted by another command or by power-off (CommandAborted)";
+pin out uint failed_id "number of the last command refused or ended by an axis error (Error)";
 pin out real ferror "pos-cmd minus pos-fb";
 pin out real actual_position "MC_ReadActualPosition: pos-fb + the MC_SetPosition offset (axis frame)";
 pin out real torque_fb "MC_ReadActualTorque: per mille of rated torque";
 pin out real velocity_fb "MC_ReadActualVelocity: machine units/s";
-pin out u32 statusword "drive statusword 0x6041 as read";
+pin out uint statusword "drive statusword 0x6041 as read";
 
 variable double v;          // profile velocity
 variable double tgt;        // position target of the running move
