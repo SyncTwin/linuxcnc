@@ -136,72 +136,72 @@ position) and on the extrajoints sim.
 """;
 
 // ---- commands (PLCopen FB inputs, one set per axis)
-pin in bit power "MC_Power.Enable";
-pin in bit execute "rising edge starts the move described by mode/position/velocity/acceleration";
-pin in bit halt "rising edge: MC_Halt: decelerate to standstill, stays interruptible";
-pin in bit stop "MC_Stop: rising edge enters Stopping (Busy), Done at standstill while stop is 1, Standstill on release";
-pin in bit reset "rising edge: MC_Reset: leave ErrorStop (also drives fault-reset-out)";
-pin in bit home "rising edge: MC_Home through the drive's own homing (cia402.home)";
-pin in bit set_position "rising edge: MC_SetPosition: position (mode 1: relative) becomes the actual position, no motion; Standstill only";
-pin in float position "target (absolute) or distance (relative), machine units";
-pin in float velocity "velocity limit of the move; in velocity mode the signed target velocity";
-pin in float acceleration "acceleration of the move (|v| rising), capped by maxa; 0 = maxa (axis default)";
-pin in float deceleration "deceleration of the move (|v| falling), capped by maxa; 0 = acceleration";
-pin in float jerk "jerk limit of the move; 0 = none (trapezoid), > 0 = S-curve (velocity moves only)";
+pin in bool power "MC_Power.Enable";
+pin in bool execute "rising edge starts the move described by mode/position/velocity/acceleration";
+pin in bool halt "rising edge: MC_Halt: decelerate to standstill, stays interruptible";
+pin in bool stop "MC_Stop: rising edge enters Stopping (Busy), Done at standstill while stop is 1, Standstill on release";
+pin in bool reset "rising edge: MC_Reset: leave ErrorStop (also drives fault-reset-out)";
+pin in bool home "rising edge: MC_Home through the drive's own homing (cia402.home)";
+pin in bool set_position "rising edge: MC_SetPosition: position (mode 1: relative) becomes the actual position, no motion; Standstill only";
+pin in real position "target (absolute) or distance (relative), machine units";
+pin in real velocity "velocity limit of the move; in velocity mode the signed target velocity";
+pin in real acceleration "acceleration of the move (|v| rising), capped by maxa; 0 = maxa (axis default)";
+pin in real deceleration "deceleration of the move (|v| falling), capped by maxa; 0 = acceleration";
+pin in real jerk "jerk limit of the move; 0 = none (trapezoid), > 0 = S-curve (velocity moves only)";
 pin in s32 mode "0 absolute, 1 relative, 2 velocity (set-position: 0 absolute, 1 relative)";
 pin in s32 buffer_mode "index in BUFFER_MODES; only 0 (mcAborting) implemented";
 
 // ---- limits, as in [JOINT_n] of a machine config
-pin in float min_limit "soft limit low, [JOINT_n]MIN_LIMIT";
-pin in float max_limit "soft limit high, [JOINT_n]MAX_LIMIT";
-pin in bit limits_enable = 1 "0: continuous (modulo) joint without soft limits: min/max ignored, maxv/maxa/ferror-max still apply";
-pin in float maxv "velocity ceiling, [JOINT_n]MAX_VELOCITY";
-pin in float maxa "acceleration ceiling, [JOINT_n]MAX_ACCELERATION";
-pin in float ferror_max "following error that trips ErrorStop, [JOINT_n]FERROR";
+pin in real min_limit "soft limit low, [JOINT_n]MIN_LIMIT";
+pin in real max_limit "soft limit high, [JOINT_n]MAX_LIMIT";
+pin in bool limits_enable = 1 "0: continuous (modulo) joint without soft limits: min/max ignored, maxv/maxa/ferror-max still apply";
+pin in real maxv "velocity ceiling, [JOINT_n]MAX_VELOCITY";
+pin in real maxa "acceleration ceiling, [JOINT_n]MAX_ACCELERATION";
+pin in real ferror_max "following error that trips ErrorStop, [JOINT_n]FERROR";
 
 // ---- from the drive (e.g. cia402)
-pin in bit stat_op_enabled "cia402.N.stat-op-enabled";
-pin in bit drv_fault "cia402.N.drv-fault";
-pin in bit stat_homed "cia402.N.stat-homed";
-pin in float pos_fb "cia402.N.pos-fb";
+pin in bool stat_op_enabled "cia402.N.stat-op-enabled";
+pin in bool drv_fault "cia402.N.drv-fault";
+pin in bool stat_homed "cia402.N.stat-homed";
+pin in real pos_fb "cia402.N.pos-fb";
 pin in s32 drv_torque "drive actual torque 0x6077 (per mille of rated), raw from the bus";
-pin in float drv_velocity "cia402.N.velocity-fb (machine units/s)";
+pin in real drv_velocity "cia402.N.velocity-fb (machine units/s)";
 pin in u32 drv_statusword "drive statusword 0x6041, raw from the bus";
 pin in u32 drive_error "drive error code 0x603F as read, 0 = no fault (passed through for the caller, not interpreted)";
 
 // ---- to the drive (e.g. cia402)
-pin out float pos_cmd "to cia402.N.pos-cmd";
-pin out float vel_cmd "commanded velocity of the profile (for display/feed-forward)";
-pin out bit enable_out "to cia402.N.enable";
-pin out bit fault_reset_out "to cia402.N.fault-reset, high while a reset is pending in ErrorStop";
-pin io bit drive_home "to cia402.N.home (io: cia402 clears it when the drive has homed)";
+pin out real pos_cmd "to cia402.N.pos-cmd";
+pin out real vel_cmd "commanded velocity of the profile (for display/feed-forward)";
+pin out bool enable_out "to cia402.N.enable";
+pin out bool fault_reset_out "to cia402.N.fault-reset, high while a reset is pending in ErrorStop";
+pin io bool drive_home "to cia402.N.home (io: cia402 clears it when the drive has homed)";
 
 // ---- drive profile: only with drive-profile = 1, inert otherwise
-pin in bit drive_profile = 0 "1: the drive plans the move (CiA-402 PP, cia402 pp-mode): no own trapezoid, pos-cmd is the target, the drive's 0x6065 guards the following error";
-pin in bit drv_move_done "cia402.N.pp-done";
-pin out bit move_execute "to cia402.N.pp-execute: one period high per accepted move";
-pin out bit move_halt "to cia402.N.pp-halt: high while halting/stopping";
-pin out float move_velocity "to cia402.N.pp-velocity";
-pin out float move_acceleration "to cia402.N.pp-accel";
+pin in bool drive_profile = 0 "1: the drive plans the move (CiA-402 PP, cia402 pp-mode): no own trapezoid, pos-cmd is the target, the drive's 0x6065 guards the following error";
+pin in bool drv_move_done "cia402.N.pp-done";
+pin out bool move_execute "to cia402.N.pp-execute: one period high per accepted move";
+pin out bool move_halt "to cia402.N.pp-halt: high while halting/stopping";
+pin out real move_velocity "to cia402.N.pp-velocity";
+pin out real move_acceleration "to cia402.N.pp-accel";
 
 // ---- status (PLCopen FB outputs)
 pin out s32 state "AxisState code";
-pin out bit busy;
-pin out bit done;
-pin out bit active;
-pin out bit command_aborted;
-pin out bit in_velocity "velocity mode reached its target velocity";
-pin out bit error;
+pin out bool busy;
+pin out bool done;
+pin out bool active;
+pin out bool command_aborted;
+pin out bool in_velocity "velocity mode reached its target velocity";
+pin out bool error;
 pin out s32 error_id "outcome of the newest command: refusal code, else the ErrorStop reason";
 pin out s32 axis_error_id "MC_ReadAxisError: why the axis is in ErrorStop, 0 outside it";
 pin out u32 command_id "number of the newest command (rising edge of execute/halt/stop/reset/home); busy/done/error/command-aborted/error-id belong to it";
 pin out u32 done_id "number of the last command that completed (Done)";
 pin out u32 aborted_id "number of the last command aborted by another command or by power-off (CommandAborted)";
 pin out u32 failed_id "number of the last command refused or ended by an axis error (Error)";
-pin out float ferror "pos-cmd minus pos-fb";
-pin out float actual_position "MC_ReadActualPosition: pos-fb + the MC_SetPosition offset (axis frame)";
-pin out float torque_fb "MC_ReadActualTorque: per mille of rated torque";
-pin out float velocity_fb "MC_ReadActualVelocity: machine units/s";
+pin out real ferror "pos-cmd minus pos-fb";
+pin out real actual_position "MC_ReadActualPosition: pos-fb + the MC_SetPosition offset (axis frame)";
+pin out real torque_fb "MC_ReadActualTorque: per mille of rated torque";
+pin out real velocity_fb "MC_ReadActualVelocity: machine units/s";
 pin out u32 statusword "drive statusword 0x6041 as read";
 
 variable double v;          // profile velocity
