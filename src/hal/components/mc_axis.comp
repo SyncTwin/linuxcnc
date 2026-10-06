@@ -230,7 +230,7 @@ variable int home_started;  // homing armed: stat-homed seen 0 since the request
 variable int move_armed;    // drive-profile: drv-move-done seen 0 since the set-point (a halt keeps it:
                             // done already 1 at the halt means the drive stands)
 
-function _ fp;
+function _;
 ;;
 
 #include <rtapi_math.h>
