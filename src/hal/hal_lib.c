@@ -148,7 +148,8 @@ static void free_funct_struct(hal_funct_t * funct);
 #endif /* RTAPI */
 static void free_funct_entry_struct(hal_funct_entry_t * funct_entry);
 static hal_list_t *funct_entry_unlink(hal_list_t * entry);
-static int thread_wait_quiescent(hal_thread_t * thread);
+static int funct_entry_release(hal_thread_t * thread,
+    hal_funct_entry_t * funct_entry);
 #ifdef RTAPI
 static void free_thread_struct(hal_thread_t * thread);
 #endif /* RTAPI */
@@ -2273,6 +2274,7 @@ int hal_del_funct_from_thread(const char *funct_name, const char *thread_name)
     hal_funct_t *funct;
     hal_list_t *list_root, *list_entry;
     hal_funct_entry_t *funct_entry;
+    int retval;
 
     if (hal_data == 0) {
 	rtapi_print_msg(RTAPI_MSG_ERR,
@@ -2346,22 +2348,11 @@ int hal_del_funct_from_thread(const char *funct_name, const char *thread_name)
 	if (SHMPTR(funct_entry->funct_ptr) == funct) {
 	    /* this funct entry points to our funct, unlink */
 	    funct_entry_unlink(list_entry);
-	    /* the realtime thread walks the list without the mutex; it may
-	       be standing on this entry right now. Don't recycle the entry
-	       (or let the caller unload the code) until the thread has
-	       finished the pass that could still see it. */
-	    if (thread_wait_quiescent(thread) < 0) {
-		/* thread is stalled: leak the entry rather than hand the
-		   thread a recycled one */
-		funct->users--;
-		rtapi_mutex_give(&(hal_data->mutex));
-		return -ETIMEDOUT;
-	    }
-	    /* and delete it */
-	    free_funct_entry_struct(funct_entry);
+	    /* and delete it, once the thread can no longer be on it */
+	    retval = funct_entry_release(thread, funct_entry);
 	    /* done */
 	    rtapi_mutex_give(&(hal_data->mutex));
-	    return 0;
+	    return retval;
 	}
 	/* try next one */
 	list_entry = list_next(list_entry);
@@ -3520,14 +3511,8 @@ static void free_funct_struct(hal_funct_t * funct)
 		if (SHMPTR(funct_entry->funct_ptr) == funct) {
 		    /* this funct entry points to our funct, unlink */
 		    list_entry = funct_entry_unlink(list_entry);
-		    /* let the thread leave it before it is recycled and the
-		       code behind it is unloaded */
-		    if (thread_wait_quiescent(thread) < 0) {
-			/* stalled thread: leak the entry */
-			continue;
-		    }
-		    /* and delete it */
-		    free_funct_entry_struct(funct_entry);
+		    /* and delete it, unless the thread may still be on it */
+		    funct_entry_release(thread, funct_entry);
 		} else {
 		    /* no match, try the next one */
 		    list_entry = list_next(list_entry);
@@ -3555,7 +3540,7 @@ static void free_funct_struct(hal_funct_t * funct)
 /* Unlink a funct entry from a list the realtime thread may be walking.
    Unlike list_remove_entry() the entry keeps its own links, so a thread
    standing on it still reaches the rest of the list instead of looping on
-   the entry. The entry must not be reused before thread_wait_quiescent().
+   the entry. The entry must not be reused before funct_entry_release().
    Returns the next entry. */
 static hal_list_t *funct_entry_unlink(hal_list_t * entry)
 {
@@ -3568,48 +3553,66 @@ static hal_list_t *funct_entry_unlink(hal_list_t * entry)
     return next;
 }
 
-/* Number of thread periods to wait for a running thread to finish the
-   pass that may still reference an unlinked funct entry. */
-#define HAL_QUIESCE_PERIODS 1000
+#ifdef ULAPI
+/* How long delf waits for a thread to leave a removed funct entry. A
+   thread that has not finished a pass in this many periods is stuck or
+   starved; delf then fails instead of waiting forever. */
+#define QUIESCENT_TIMEOUT_PERIODS 1000
 
 /* Called with the HAL mutex held, after a funct entry was unlinked from
    'thread'. The realtime thread walks its funct_list without the mutex,
-   so it may still hold a pointer to the unlinked entry. Wait until the
-   thread completed two more passes (any pass that started before the
-   unlink has ended) before the entry may be freed. Returns 0 when it is
-   safe (or threads are not running), -ETIMEDOUT if the thread stalled. */
+   so it may still be on the unlinked entry. Wait until the thread's pass
+   counter advanced by two (the pass that could see the entry has ended)
+   or the threads are stopped. Returns 0, or -ETIMEDOUT. */
 static int thread_wait_quiescent(hal_thread_t * thread)
 {
-    unsigned int start, now;
-    long step;
-    long long waited, limit;
+    unsigned int start;
+    int n;
 
-    if (hal_data->threads_running == 0) {
-	/* thread is not walking the list */
-	return 0;
-    }
     /* order the unlink stores before reading the pass counter */
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     start = __atomic_load_n(&thread->beatcnt, __ATOMIC_ACQUIRE);
-    step = thread->period / 4;
-    if (step > rtapi_delay_max()) {
-	step = rtapi_delay_max();
-    }
-    if (step < 1) {
-	step = 1;
-    }
-    limit = (long long)thread->period * HAL_QUIESCE_PERIODS;
-    for (waited = 0; waited < limit; waited += step) {
-	now = __atomic_load_n(&thread->beatcnt, __ATOMIC_ACQUIRE);
-	if (now - start >= 2) {
+    for (n = 0; n < QUIESCENT_TIMEOUT_PERIODS; n++) {
+	rtapi_delay(thread->period);
+	if (hal_data->threads_running == 0
+	    || __atomic_load_n(&thread->beatcnt, __ATOMIC_ACQUIRE) - start >= 2) {
 	    return 0;
 	}
-	rtapi_delay(step);
     }
-    rtapi_print_msg(RTAPI_MSG_ERR,
-	"HAL: ERROR: thread '%s' did not complete a pass within %d periods,"
-	" funct entry not freed\n", thread->name, HAL_QUIESCE_PERIODS);
     return -ETIMEDOUT;
+}
+#endif /* ULAPI */
+
+/* Free a funct entry that was unlinked from 'thread' with
+   funct_entry_unlink(). While the threads run, the thread may still be
+   on the entry. delf (ULAPI) waits until it has left. Code that runs in
+   RTAPI (a component's exit, unloadrt) must not wait; there the entry
+   is not recycled and an error is reported, the threads should be
+   stopped or the function removed with delf before unloading. */
+static int funct_entry_release(hal_thread_t * thread,
+    hal_funct_entry_t * funct_entry)
+{
+    hal_funct_t *funct = SHMPTR(funct_entry->funct_ptr);
+
+    if (hal_data->threads_running > 0) {
+#ifdef ULAPI
+	if (thread_wait_quiescent(thread) != 0) {
+	    rtapi_print_msg(RTAPI_MSG_ERR,
+		"HAL: ERROR: thread '%s' did not leave function '%s' within"
+		" %d periods; the function must not be unloaded\n",
+		thread->name, funct->name, QUIESCENT_TIMEOUT_PERIODS);
+	    return -ETIMEDOUT;
+	}
+#else
+	rtapi_print_msg(RTAPI_MSG_ERR,
+	    "HAL: ERROR: function '%s' removed from running thread '%s';"
+	    " stop the threads or delf the function before unloading\n",
+	    funct->name, thread->name);
+	return -EBUSY;
+#endif
+    }
+    free_funct_entry_struct(funct_entry);
+    return 0;
 }
 
 static void free_funct_entry_struct(hal_funct_entry_t * funct_entry)

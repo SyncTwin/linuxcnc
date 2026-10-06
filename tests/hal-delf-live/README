@@ -1,15 +1,19 @@
-delf / unloadrt of a function while its thread is running.
+delf of a function while its thread is running.
 
-The realtime thread walks its funct_list without the HAL mutex. Without
-quiescence, hal_del_funct_from_thread() unlinks the entry (its links then
-point to itself) and recycles it at once; a thread that is inside the
-entry keeps calling it forever or follows a recycled link, and the
-following unloadrt dlclose()s code the thread may still execute. The
-result is a hung thread or a crashed rtapi_app.
+The realtime thread walks its funct_list without the HAL mutex. Before
+the fix, hal_del_funct_from_thread() unlinked the entry (its links then
+pointed to itself) and recycled it at once; a thread that was on the
+entry kept calling it or followed a recycled link, and a following
+unloadrt dlclose()d code the thread could still execute.
 
-The test loads a component whose function busy-waits a fixed time, so the
-thread spends a large share of each period on the entry being removed, and
-repeats loadrt -> addf -> delf -> unloadrt DELF_ITER times (default 200)
-with threads started. It passes when halrun finishes in time and the
-thread still runs afterwards (siggen.0.update in the same
-thread keeps changing its output).
+Now delf (ULAPI) waits until the thread has left the removed entry (the
+thread's pass counter advanced by two), at most 1000 thread periods; on
+timeout it fails and the entry is not recycled. unloadrt (RTAPI) does not
+wait: with the threads running it unlinks the entry, does not recycle it
+and reports an error. The supported way to replace a component in a
+running thread is delf first, then unloadrt.
+
+delftest.sh makes the thread stay inside the function of delfvictim (pin
+hold, 500 periods) and runs delf. When delf returns, pin inside must be
+false. Then the component is unloaded, loaded again, and its pass
+counter must advance. No nets and no wall-clock timeouts in the test.
