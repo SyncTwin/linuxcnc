@@ -1,0 +1,673 @@
+component mc_axis "PLCopen MC Part 1 single-axis state machine with a trapezoid / jerk-limited profile";
+author "SyncTwin";
+license "GPL";
+
+description
+"""
+A single axis driven by PLCopen Motion Control Part 1 commands
+(MC_Power, MC_MoveAbsolute, MC_MoveRelative, MC_MoveVelocity, MC_Halt,
+MC_Stop, MC_Reset, MC_Home, MC_SetPosition) from HAL pins, for axes that
+are not interpolated by the G-code trajectory planner: an extra joint of
+motion (*joint.N.posthome-cmd*, see *motion*(9),
+num_extrajoints), or a drive in a HAL configuration without motion
+(positioner, conveyor, pallet handler).  One instance per axis.
+*pos-cmd* is the position command, *pos-fb* its feedback.
+
+Compared with *limit3*(9) the axis knows when a move is done, can be
+halted, stopped and reset, refuses a target outside the soft limits instead
+of clipping it, checks the following error, and reports why it stopped.
+
+STATE CODES (pin *state*, PLCopen axis state diagram): 0 Disabled,
+1 Standstill, 2 Homing, 3 DiscreteMotion, 4 ContinuousMotion,
+5 SynchronizedMotion (not produced), 6 Stopping, 7 ErrorStop.
+
+BUFFER MODE (pin *buffer-mode*): 0 mcAborting (the only one
+implemented), 1 mcBuffered, 2..5 the mcBlending modes.  Anything but 0 is refused
+with error-id 1.
+
+MOVE MODE (pin *mode*): 0 absolute (MC_MoveAbsolute), 1 relative
+(MC_MoveRelative), 2 velocity (MC_MoveVelocity, direction = sign of
+*velocity*).
+
+MC_SETPOSITION (pin *set-position*): a rising edge in Standstill makes
+*position* the axis's actual position (mode 1: actual + position), no
+motion; Done in the same period.  The shift is an offset of the axis
+(axis position = pos-fb + offset): pos-cmd and pos-fb stay in the drive's
+frame, so the drive sees no step.  The absolute target, the soft limits and
+actual-position are in the axis frame.  In any other state it is refused
+(error 2).  MC_Home clears the offset; so does reloading the component.
+
+ERROR IDS (pin *error-id*): 1 buffer mode not implemented, 2 command
+not allowed in this state, 3 drive fault, 4 following error over ferror-max,
+5 soft limit (target outside, or reached in velocity mode), 6 drive left
+operation-enabled while powered, 7 invalid limits/parameters (maxv, maxa,
+ferror-max must be > 0, max-limit > min-limit), 8 unknown mode, 9 homing
+error (statusword bit 13 while the drive homes).
+
+ONE MULTIPLEXED FB: one set of outputs per axis, not one per function block
+instance.  The outputs belong to the NEWEST command or event, so that Busy,
+Done, Error and CommandAborted are mutually exclusive in every period
+(PLCopen Part 1, 2.4.1): a refused command takes Error over a move that
+keeps running (it drops Busy/Active, and the move's own completion raises no
+Done); an axis error takes Error over the command it ended.
+*error-id* is that newest outcome: the refusal code, else the
+ErrorStop reason.  *axis-error-id* is the axis alone
+(MC_ReadAxisError): why the axis is in ErrorStop, 0 outside it.  Done,
+CommandAborted and a refusal Error stay while the input that started the
+command (execute/halt/stop/reset/home/set-position) is held and are reset
+one period after it falls; the ErrorStop reason stays until MC_Reset.
+
+COMMAND NUMBERS (pins *command-id*, *done-id*,
+*aborted-id*, *failed-id*): every rising edge of
+execute/halt/stop/reset/home/set-position gets the next number on
+command-id; the axis resolves each command by its number: done-id when it
+completed, aborted-id when another command or power-off ended it,
+failed-id when it was refused or an axis error ended it.  This lets one
+axis serve several callers: a caller keeps the number command-id showed
+after its own edge and is Busy until that number appears on done-id,
+aborted-id or failed-id.
+
+MC_HOME (pin *home*): the drive homes itself (CiA-402 homing mode,
+e.g. the cia402 component of linuxcnc-ethercat).  Homing is armed once
+stat-homed reads 0 (a stale 1 from an earlier homing is not taken for
+success) and ends on the next 1; the axis clears drive-home itself.  Bit 13
+of drv-statusword while armed is a homing error (ErrorStop 9).  An extra
+joint of motion is homed by motion instead: wire joint.N.homed to
+stat-op-enabled and leave home unconnected.
+
+DRIVE PROFILE (pin *drive-profile* = 1): for a drive without cyclic
+position mode (CiA-402 Profile Position).  An accepted absolute/relative
+move is handed over whole: pos-cmd = target, move-velocity,
+move-acceleration, one period of move-execute; done comes from
+drv-move-done (seen 0 after the set-point, then 1).  Halt/stop and ErrorStop
+raise move-halt.  No own profile, no following-error check (the drive
+checks it).  Velocity moves are refused (error 8).  With drive-profile = 0
+(default) none of this runs.
+
+ACCELERATION, DECELERATION, JERK (inputs of MC_Move*): *acceleration*
+raises |v| (0 = the axis default maxa), *deceleration* lowers it
+(0 = same as acceleration), both capped by maxa.  *jerk* = 0 is no
+jerk limit (trapezoid); jerk > 0 is a jerk-limited S-curve, implemented for
+velocity moves (MC_MoveVelocity and MC_Halt of such a move).  A position
+move with jerk > 0 is refused (error 7), not ignored; so is drive-profile
+with a jerk or a deceleration different from acceleration.  MC_Stop and
+ErrorStop brake at maxa without a jerk limit.
+
+CONTINUOUS AXIS (pin *limits-enable* = 0): a modulo axis without soft
+limits; min-limit/max-limit are not checked, a velocity move runs until
+halt/stop; maxv, maxa and ferror-max stay in force.
+
+Transitions follow the PLCopen state diagram: motion only from Standstill
+or a motion state; ErrorStop is left only through reset; Stopping holds
+while stop is 1.  The following-error check is always on while powered; a
+non-positive ferror-max keeps the axis Disabled (error 7) instead of
+disabling the check.
+""";
+
+notes
+"""
+Wiring to an extra joint of motion (see configs/sim/axis/extrajoints/mc_axis.ini):
+
+----
+net ax-cmd  ax4.pos-cmd    => joint.4.posthome-cmd
+net ax-fb   joint.4.pos-fb => ax4.pos-fb
+net ax-ok   joint.4.homed  => ax4.stat-op-enabled
+setp ax4.maxv [JOINT_4]MAX_VELOCITY  (and maxa, min-limit, max-limit, ferror-max)
+----
+
+Wiring to a CiA-402 drive (cia402 component of linuxcnc-ethercat, per axis N):
+
+----
+net ax-cmd   mc-axis.N.pos-cmd         => cia402.N.pos-cmd
+net ax-fb    cia402.N.pos-fb           => mc-axis.N.pos-fb
+net ax-en    mc-axis.N.enable-out      => cia402.N.enable
+net ax-opena cia402.N.stat-op-enabled  => mc-axis.N.stat-op-enabled
+net ax-flt   cia402.N.drv-fault        => mc-axis.N.drv-fault
+net ax-frst  mc-axis.N.fault-reset-out => cia402.N.fault-reset
+net ax-homd  cia402.N.stat-homed       => mc-axis.N.stat-homed
+net ax-home  mc-axis.N.drive-home     <=> cia402.N.home
+----
+
+The target (position, mode, velocity) must be computed no later than the
+execute edge in the same thread.
+
+Tested on a CiA-402 EtherCAT servo (Inovance SV660N, cyclic synchronous
+position) and on the extrajoints sim.
+""";
+
+// ---- commands (PLCopen FB inputs, one set per axis)
+pin in bit power "MC_Power.Enable";
+pin in bit execute "rising edge starts the move described by mode/position/velocity/acceleration";
+pin in bit halt "rising edge: MC_Halt: decelerate to standstill, stays interruptible";
+pin in bit stop "MC_Stop: rising edge enters Stopping (Busy), Done at standstill while stop is 1, Standstill on release";
+pin in bit reset "rising edge: MC_Reset: leave ErrorStop (also drives fault-reset-out)";
+pin in bit home "rising edge: MC_Home through the drive's own homing (cia402.home)";
+pin in bit set_position "rising edge: MC_SetPosition: position (mode 1: relative) becomes the actual position, no motion; Standstill only";
+pin in float position "target (absolute) or distance (relative), machine units";
+pin in float velocity "velocity limit of the move; in velocity mode the signed target velocity";
+pin in float acceleration "acceleration of the move (|v| rising), capped by maxa; 0 = maxa (axis default)";
+pin in float deceleration "deceleration of the move (|v| falling), capped by maxa; 0 = acceleration";
+pin in float jerk "jerk limit of the move; 0 = none (trapezoid), > 0 = S-curve (velocity moves only)";
+pin in s32 mode "0 absolute, 1 relative, 2 velocity (set-position: 0 absolute, 1 relative)";
+pin in s32 buffer_mode "index in BUFFER_MODES; only 0 (mcAborting) implemented";
+
+// ---- limits, as in [JOINT_n] of a machine config
+pin in float min_limit "soft limit low, [JOINT_n]MIN_LIMIT";
+pin in float max_limit "soft limit high, [JOINT_n]MAX_LIMIT";
+pin in bit limits_enable = 1 "0: continuous (modulo) joint without soft limits: min/max ignored, maxv/maxa/ferror-max still apply";
+pin in float maxv "velocity ceiling, [JOINT_n]MAX_VELOCITY";
+pin in float maxa "acceleration ceiling, [JOINT_n]MAX_ACCELERATION";
+pin in float ferror_max "following error that trips ErrorStop, [JOINT_n]FERROR";
+
+// ---- from the drive (e.g. cia402)
+pin in bit stat_op_enabled "cia402.N.stat-op-enabled";
+pin in bit drv_fault "cia402.N.drv-fault";
+pin in bit stat_homed "cia402.N.stat-homed";
+pin in float pos_fb "cia402.N.pos-fb";
+pin in s32 drv_torque "drive actual torque 0x6077 (per mille of rated), raw from the bus";
+pin in float drv_velocity "cia402.N.velocity-fb (machine units/s)";
+pin in u32 drv_statusword "drive statusword 0x6041, raw from the bus";
+pin in u32 drive_error "drive error code 0x603F as read, 0 = no fault (passed through for the caller, not interpreted)";
+
+// ---- to the drive (e.g. cia402)
+pin out float pos_cmd "to cia402.N.pos-cmd";
+pin out float vel_cmd "commanded velocity of the profile (for display/feed-forward)";
+pin out bit enable_out "to cia402.N.enable";
+pin out bit fault_reset_out "to cia402.N.fault-reset, high while a reset is pending in ErrorStop";
+pin io bit drive_home "to cia402.N.home (io: cia402 clears it when the drive has homed)";
+
+// ---- drive profile: only with drive-profile = 1, inert otherwise
+pin in bit drive_profile = 0 "1: the drive plans the move (CiA-402 PP, cia402 pp-mode): no own trapezoid, pos-cmd is the target, the drive's 0x6065 guards the following error";
+pin in bit drv_move_done "cia402.N.pp-done";
+pin out bit move_execute "to cia402.N.pp-execute: one period high per accepted move";
+pin out bit move_halt "to cia402.N.pp-halt: high while halting/stopping";
+pin out float move_velocity "to cia402.N.pp-velocity";
+pin out float move_acceleration "to cia402.N.pp-accel";
+
+// ---- status (PLCopen FB outputs)
+pin out s32 state "AxisState code";
+pin out bit busy;
+pin out bit done;
+pin out bit active;
+pin out bit command_aborted;
+pin out bit in_velocity "velocity mode reached its target velocity";
+pin out bit error;
+pin out s32 error_id "outcome of the newest command: refusal code, else the ErrorStop reason";
+pin out s32 axis_error_id "MC_ReadAxisError: why the axis is in ErrorStop, 0 outside it";
+pin out u32 command_id "number of the newest command (rising edge of execute/halt/stop/reset/home); busy/done/error/command-aborted/error-id belong to it";
+pin out u32 done_id "number of the last command that completed (Done)";
+pin out u32 aborted_id "number of the last command aborted by another command or by power-off (CommandAborted)";
+pin out u32 failed_id "number of the last command refused or ended by an axis error (Error)";
+pin out float ferror "pos-cmd minus pos-fb";
+pin out float actual_position "MC_ReadActualPosition: pos-fb + the MC_SetPosition offset (axis frame)";
+pin out float torque_fb "MC_ReadActualTorque: per mille of rated torque";
+pin out float velocity_fb "MC_ReadActualVelocity: machine units/s";
+pin out u32 statusword "drive statusword 0x6041 as read";
+
+variable double v;          // profile velocity
+variable double tgt;        // position target of the running move
+variable double cmd_vel;    // velocity cap / target of the running move
+variable double cmd_acc;    // acceleration of the running move
+variable double cmd_dec;    // deceleration of the running move
+variable double cmd_jerk;   // jerk limit of the running move, 0 = trapezoid
+variable double a_cur;      // profile acceleration (continuity for the S-curve)
+variable int run;           // 0 none, 1 position move, 2 velocity move, 3 decel-to-stop
+variable int err_latched;   // axis error (ErrorStop) id
+variable int cmd_err;       // command refusal id (does not change state)
+variable int reset_req;
+variable int term_shown;  // a terminal output (done/aborted/refusal) has been out one period
+variable int seq;         // last command number given out (command-id)
+variable int run_id;      // number of the command the axis is executing, 0 none
+variable int owner;       // input of the newest command: 1 execute 2 halt 3 stop 4 reset 5 home 6 set-position, 0 none
+variable int execute_old;
+variable int halt_old;
+variable int stop_old;
+variable int reset_old;
+variable int home_old;
+variable int set_old;
+variable double off;        // MC_SetPosition offset: axis position = drive position (pos-fb) + off
+variable int home_started;  // homing armed: stat-homed seen 0 since the request
+variable int move_armed;    // drive-profile: drv-move-done seen 0 since the set-point (a halt keeps it:
+                            // done already 1 at the halt means the drive stands)
+
+function _ fp;
+;;
+
+#include <rtapi_math.h>
+
+/* pin state: PLCopen axis states */
+#define ST_DISABLED 0
+#define ST_STANDSTILL 1
+#define ST_HOMING 2
+#define ST_DISCRETE_MOTION 3
+#define ST_CONTINUOUS_MOTION 4
+#define ST_SYNCHRONIZED_MOTION 5
+#define ST_STOPPING 6
+#define ST_ERROR_STOP 7
+
+/* pin error-id */
+#define E_BUFFER_MODE_NOT_IMPLEMENTED 1
+#define E_COMMAND_NOT_ALLOWED_IN_STATE 2
+#define E_DRIVE_FAULT 3
+#define E_FOLLOWING_ERROR_OVER_LIMIT 4
+#define E_SOFT_LIMIT 5
+#define E_DRIVE_LEFT_OPERATION_ENABLED 6
+#define E_INVALID_LIMITS_OR_PARAMETERS 7
+#define E_UNKNOWN_MODE 8
+#define E_HOMING_ERROR 9
+
+#define RUN_NONE 0
+#define RUN_POS  1
+#define RUN_VEL  2
+#define RUN_STOP 3
+
+static int limits_ok(struct __comp_state *__comp_inst) {
+    return maxv > 0.0 && maxa > 0.0 && ferror_max > 0.0
+        && (!limits_enable || max_limit > min_limit);
+}
+
+/* Set the ramps of a stop at the axis ceiling: trapezoid, no jerk limit. */
+static void ramps_max(struct __comp_state *__comp_inst) {
+    cmd_acc = cmd_dec = maxa > 0.0 ? maxa : 1e9;  /* no valid ceiling: stop at once */
+    cmd_jerk = 0.0;
+}
+
+/* One period of the jerk-limited velocity ramp toward vreq (S-curve): the
+ * position trapezoid below one derivative up: the acceleration that still
+ * rounds off to 0 exactly at vreq at jerk J (a^2 = 2 J dv, corrected by one
+ * period), capped by cmd_acc while |v| rises and cmd_dec while it falls,
+ * reached at rate J. */
+static void scurve_step(struct __comp_state *__comp_inst, double vreq, double dt) {
+    double rem = vreq - v, dj = cmd_jerk * dt, alim, areq;
+    if (fabs(rem) <= 0.5 * dj * dt && fabs(a_cur) <= dj) { v = vreq; a_cur = 0.0; return; }
+    alim = (v == 0.0 || (v > 0.0) == (rem > 0.0)) ? cmd_acc : cmd_dec;
+    areq = -dj + sqrt(2.0 * cmd_jerk * fabs(rem) + dj * dj);
+    if (areq > alim) areq = alim;
+    if (rem < 0.0) areq = -areq;
+    if (areq > a_cur + dj) a_cur += dj;
+    else if (areq < a_cur - dj) a_cur -= dj;
+    else a_cur = areq;
+    v += a_cur * dt;
+}
+
+/* One period of the profile.  Position move: the velocity that still stops
+ * exactly at the target with deceleration cmd_dec (v^2 = 2 d s, corrected by one
+ * period of discretisation), capped by vcap; |v| rises at cmd_acc and falls at
+ * cmd_dec (trapezoid).  Velocity move / stop: ramp to vcap (signed) or 0, an
+ * S-curve when cmd_jerk > 0.  Returns 1 when the move is finished. */
+static int profile_step(struct __comp_state *__comp_inst, double dt) {
+    double dd = cmd_dec * dt, vreq, vold = v, d, r;
+    int fin = 0;
+    if (run == RUN_POS) {
+        d = tgt - pos_cmd;
+        if (fabs(d) <= 0.5 * dd * dt && fabs(v) <= dd) {
+            pos_cmd_set(tgt); v = 0.0; a_cur = 0.0;
+            return 1;
+        }
+        vreq = -dd + sqrt(2.0 * cmd_dec * fabs(d) + dd * dd);
+        /* a velocity move that turned into the stop at its soft limit keeps its
+         * signed cmd_vel: cap by the magnitude, the sign comes from d below */
+        if (vreq > fabs(cmd_vel)) vreq = fabs(cmd_vel);
+        if (d < 0) vreq = -vreq;
+    } else if (run == RUN_VEL) {
+        vreq = cmd_vel;
+    } else {
+        vreq = 0.0;
+    }
+    if (cmd_jerk > 0.0 && run != RUN_POS) {
+        scurve_step(__comp_inst, vreq, dt);
+    } else {
+        /* |v| falls toward vreq: deceleration, else acceleration */
+        r = ((v > 0.0 && vreq < v) || (v < 0.0 && vreq > v)) ? cmd_dec : cmd_acc;
+        r *= dt;
+        if (vreq > v + r) v += r;
+        else if (vreq < v - r) v -= r;
+        else v = vreq;
+        a_cur = v == vreq ? 0.0 : (v - vold) / dt;
+    }
+    pos_cmd_set(pos_cmd + (0.5 * (v + vold) * dt));
+    if (run == RUN_STOP && v == 0.0 && a_cur == 0.0) fin = 1;
+    if (run == RUN_VEL) in_velocity_set((v == cmd_vel));
+    return fin;
+}
+
+static void end_command(struct __comp_state *__comp_inst, int aborted) {
+    if (busy && aborted) { command_aborted_set(1); term_shown = 0; }
+    if (run_id) {   /* the command is resolved by number even when newer ones own the outputs */
+        if (aborted) aborted_id_set(run_id); else done_id_set(run_id);
+        run_id = 0;
+    }
+    busy_set(0); active_set(0); in_velocity_set(0);
+}
+
+/* A command finished: Done only when it still owns the outputs (busy) -
+ * a newer, refused command keeps them (PLCopen Part 1, 2.4.1). */
+static void complete(struct __comp_state *__comp_inst) {
+    int mine = busy;
+    end_command(__comp_inst, 0);
+    if (mine) { done_set(1); term_shown = 0; }
+}
+
+static void to_errorstop(struct __comp_state *__comp_inst, int id) {
+    if (state == ST_ERROR_STOP) return;
+    if (drive_profile) move_halt_set(1);
+    err_latched = id;
+    cmd_err = 0;   /* the axis error is the newest event: it owns error-id */
+    if (run_id) { failed_id_set(run_id); run_id = 0; }
+    end_command(__comp_inst, 1);
+    state_set(ST_ERROR_STOP);
+    run = RUN_STOP;
+    ramps_max(__comp_inst);
+}
+
+/* Accept a move command; returns 0 and sets cmd_err when refused. */
+static int accept_move(struct __comp_state *__comp_inst) {
+    double t, lo = min_limit - off, hi = max_limit - off;   /* soft limits in the drive frame */
+    if (buffer_mode != 0) { cmd_err = E_BUFFER_MODE_NOT_IMPLEMENTED; return 0; }
+    if (mode < 0 || mode > 2) { cmd_err = E_UNKNOWN_MODE; return 0; }
+    double acc = acceleration > 0.0 && acceleration < maxa ? acceleration : maxa;   /* 0 = axis default */
+    if (acceleration < 0.0 || maxa <= 0.0 || deceleration < 0.0 || jerk < 0.0) {
+        cmd_err = E_INVALID_LIMITS_OR_PARAMETERS; return 0;
+    }
+    /* drive-profile: velocity moves need PV, not implemented yet */
+    if (drive_profile && mode == 2) { cmd_err = E_UNKNOWN_MODE; return 0; }
+    /* refused, not ignored: the S-curve is a velocity-move ramp; pp has one ramp */
+    if (jerk > 0.0 && (mode != 2 || drive_profile)) { cmd_err = E_INVALID_LIMITS_OR_PARAMETERS; return 0; }
+    if (drive_profile && deceleration > 0.0 && deceleration != acc) {
+        cmd_err = E_INVALID_LIMITS_OR_PARAMETERS; return 0;
+    }
+    cmd_acc = acc;
+    cmd_dec = deceleration > 0.0 ? (deceleration < maxa ? deceleration : maxa) : cmd_acc;
+    cmd_jerk = jerk;
+    if (mode == 2) {
+        t = velocity;
+        if (t > maxv) t = maxv;
+        if (t < -maxv) t = -maxv;
+        if (limits_enable && ((t > 0.0 && pos_cmd >= hi) || (t < 0.0 && pos_cmd <= lo))) {
+            cmd_err = E_SOFT_LIMIT; return 0;
+        }
+        cmd_vel = t;
+        /* soft limits bound a velocity move: it plans toward the limit it heads to */
+        tgt = t >= 0.0 ? hi : lo;
+        run = RUN_VEL;
+        state_set(ST_CONTINUOUS_MOTION);
+    } else {
+        if (velocity <= 0.0) { cmd_err = E_INVALID_LIMITS_OR_PARAMETERS; return 0; }
+        t = (mode == 0) ? position - off : pos_cmd + position;
+        if (limits_enable && (t < lo || t > hi)) { cmd_err = E_SOFT_LIMIT; return 0; }
+        tgt = t;
+        cmd_vel = velocity < maxv ? velocity : maxv;
+        run = RUN_POS;
+        state_set(ST_DISCRETE_MOTION);
+        if (drive_profile) {
+            /* hand the whole move to the drive: target, velocity, acceleration */
+            pos_cmd_set(tgt);
+            move_velocity_set(cmd_vel);
+            move_acceleration_set(cmd_acc);
+            move_halt_set(0);
+            move_execute_set(1);
+            move_armed = 0;
+        }
+    }
+    return 1;
+}
+
+FUNCTION(_) {
+    double dt = period * 1e-9;
+    int ex_edge = execute && !execute_old;
+    int halt_edge = halt && !halt_old;
+    int stop_edge = stop && !stop_old;
+    int reset_edge = reset && !reset_old;
+    int home_edge = home && !home_old;
+    int set_edge = set_position && !set_old;
+    int cfg = limits_ok(__comp_inst);
+    execute_old = execute; halt_old = halt; stop_old = stop;
+    reset_old = reset; home_old = home; set_old = set_position;
+    if (drive_profile) move_execute_set(0);   /* a set-point is one period long */
+
+    /* PLCopen Part 1, 2.4.1: Done, CommandAborted and a command's Error stay while the
+     * input that started the command is held, and at least one period after
+     * it falls; then they are reset.  The axis error (ErrorStop reason) is
+     * not a command's output: it stays until MC_Reset. */
+    {
+        int held = (owner == 1 && execute) || (owner == 2 && halt) || (owner == 3 && stop)
+                || (owner == 4 && reset) || (owner == 5 && home) || (owner == 6 && set_position);
+        if (done || command_aborted || cmd_err) {
+            if (term_shown && !held) { done_set(0); command_aborted_set(0); cmd_err = 0; }
+            term_shown = 1;
+        }
+    }
+    if (ex_edge || halt_edge || home_edge || reset_edge || stop_edge || set_edge) {
+        cmd_err = 0; command_aborted_set(0); done_set(0); term_shown = 0;
+        owner = stop_edge ? 3 : ex_edge ? 1 : halt_edge ? 2 : home_edge ? 5 : set_edge ? 6 : 4;
+        seq = seq == 0x7fffffff ? 1 : seq + 1;   /* 0 = no command */
+        command_id_set(seq);
+    }
+
+    enable_out_set(power && cfg);
+
+    /* ---- transitions valid from any state (PLCopen diagram) */
+    if (drv_fault && state != ST_DISABLED) {
+        to_errorstop(__comp_inst, E_DRIVE_FAULT);
+    } else if (drv_fault && power) {
+        to_errorstop(__comp_inst, E_DRIVE_FAULT);
+    }
+    if (!power && state != ST_ERROR_STOP && state != ST_DISABLED) {
+        end_command(__comp_inst, 1);
+        drive_home_set(0);   /* a pending home request must not survive power-off */
+        state_set(ST_DISABLED);
+    }
+    if (power && !stat_op_enabled && state != ST_DISABLED && state != ST_ERROR_STOP) {
+        to_errorstop(__comp_inst, E_DRIVE_LEFT_OPERATION_ENABLED);
+    }
+
+    /* MC_SetPosition: Standstill only (P1 state diagram), refused elsewhere */
+    if (set_edge && state != ST_STANDSTILL) cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;
+
+    /* ---- per-state */
+    switch (state) {
+    case ST_DISABLED:
+        pos_cmd_set(pos_fb); v = 0.0; a_cur = 0.0; run = RUN_NONE;
+        if (!cfg && power) cmd_err = E_INVALID_LIMITS_OR_PARAMETERS;
+        if (ex_edge || halt_edge || home_edge) cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;
+        if (power && cfg && stat_op_enabled && !drv_fault) {
+            state_set(ST_STANDSTILL);
+            cmd_err = 0;
+        }
+        break;
+
+    case ST_STANDSTILL:
+        v = 0.0; a_cur = 0.0; run = RUN_NONE;
+        if (stop_edge) {
+            state_set(ST_STOPPING); run = RUN_STOP; ramps_max(__comp_inst);
+            busy_set(1); active_set(1);   /* MC_Stop is Busy until standstill */
+            if (drive_profile) run = RUN_NONE;   /* the drive stands: nothing to stop */
+        } else if (home_edge) {
+            state_set(ST_HOMING); busy_set(1); active_set(1);
+            /* arm BEFORE raising the request: a model drive ties drive-home to
+             * stat-homed on one signal, and the read would see our own 1 */
+            home_started = !stat_homed; drive_home_set(1);
+        } else if (halt_edge) {
+            done_set(1); term_shown = 0; done_id_set(command_id);
+        } else if (set_edge) {
+            /* the axis frame moves, the drive's does not: pos-cmd/pos-fb untouched */
+            off = mode == 1 ? off + position : position - pos_fb;
+            done_set(1); term_shown = 0; done_id_set(command_id);
+        } else if (ex_edge) {
+            if (accept_move(__comp_inst)) { busy_set(1); active_set(1); }
+        }
+        break;
+
+    case ST_HOMING:
+        /* the drive homes itself; the command follows the feedback so that no
+         * following error builds up and no step is commanded on return */
+        pos_cmd_set(pos_fb); v = 0.0; a_cur = 0.0;
+        if (ex_edge || halt_edge) cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;
+        if (stop_edge) {
+            drive_home_set(0);
+            end_command(__comp_inst, 1);
+            busy_set(1); active_set(1);
+            state_set(ST_STOPPING); run = RUN_STOP; ramps_max(__comp_inst);
+        } else if (home_started && ((drv_statusword >> 13) & 1)) {
+            drive_home_set(0);
+            to_errorstop(__comp_inst, E_HOMING_ERROR);
+        } else if (!stat_homed) {
+            home_started = 1;
+        } else if (home_started) {
+            drive_home_set(0);
+            off = 0.0;   /* after homing the drive's home is the axis zero */
+            complete(__comp_inst);
+            state_set(ST_STANDSTILL);
+        }
+        break;
+
+    case ST_DISCRETE_MOTION:
+    case ST_CONTINUOUS_MOTION:
+        if (drive_profile) {
+            /* the drive runs the profile; the axis follows its handshake */
+            if (stop_edge) {
+                end_command(__comp_inst, 1);
+                busy_set(1); active_set(1);
+                state_set(ST_STOPPING); run = RUN_STOP;
+                move_acceleration_set(maxa); move_halt_set(1);
+                break;
+            } else if (ex_edge) {
+                end_command(__comp_inst, 1);
+                command_aborted_set(0);
+                if (accept_move(__comp_inst)) { busy_set(1); active_set(1); }
+                else { run = RUN_STOP; move_halt_set(1); state_set(ST_DISCRETE_MOTION); }
+            } else if (halt_edge) {
+                end_command(__comp_inst, 1);
+                busy_set(1); active_set(1);
+                run = RUN_STOP; move_halt_set(1); state_set(ST_DISCRETE_MOTION);
+            } else if (home_edge) {
+                cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;
+            }
+            if (!drv_move_done) {
+                move_armed = 1;
+            } else if (move_armed) {
+                if (run == RUN_STOP) pos_cmd_set(pos_fb);   /* halted short of the target */
+                move_halt_set(0);
+                complete(__comp_inst);
+                run = RUN_NONE;
+                state_set(ST_STANDSTILL);
+            }
+            break;
+        }
+        if (stop_edge) {
+            end_command(__comp_inst, 1);
+            busy_set(1); active_set(1);
+            state_set(ST_STOPPING); run = RUN_STOP; ramps_max(__comp_inst);
+        } else if (ex_edge) {
+            /* mcAborting: the new move replaces the running one from the
+             * current position and velocity */
+            end_command(__comp_inst, 1);
+            command_aborted_set(0);
+            if (accept_move(__comp_inst)) { busy_set(1); active_set(1); }
+            else { run = RUN_STOP; state_set(ST_DISCRETE_MOTION); }   /* refused: Error, not Busy */
+        } else if (halt_edge) {
+            /* MC_Halt: decelerate with the move's deceleration (and jerk);
+             * the state is DiscreteMotion until standstill */
+            end_command(__comp_inst, 1);
+            busy_set(1); active_set(1);
+            run = RUN_STOP; state_set(ST_DISCRETE_MOTION);
+        } else if (home_edge) {
+            cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;
+        }
+        if (state == ST_STOPPING) break;
+        if (run == RUN_VEL && limits_enable) {
+            /* a velocity move plans toward the soft limit it heads to; arriving
+             * there is a soft-limit error, the profile has already stopped */
+            double d = tgt - pos_cmd, stopd = v * v / (2.0 * cmd_dec);
+            if ((v > 0 && d <= stopd) || (v < 0 && -d <= stopd)) { run = RUN_POS; cmd_jerk = 0.0; }
+        }
+        if (profile_step(__comp_inst, dt) || (run == RUN_POS && v == 0.0 && pos_cmd == tgt)) {
+            if (state == ST_CONTINUOUS_MOTION && run == RUN_POS) {
+                to_errorstop(__comp_inst, E_SOFT_LIMIT);
+                v = 0.0; a_cur = 0.0; run = RUN_NONE;
+            } else {
+                complete(__comp_inst);
+                run = RUN_NONE;
+                state_set(ST_STANDSTILL);
+            }
+        }
+        break;
+
+    case ST_STOPPING:
+        if (ex_edge || halt_edge || home_edge) cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;
+        if (drive_profile) {
+            if (!drv_move_done) move_armed = 1;
+            else if (move_armed && run == RUN_STOP) { run = RUN_NONE; pos_cmd_set(pos_fb); }
+            /* MC_Stop: Done at standstill while stop is held, Standstill on release */
+            if (run == RUN_NONE && busy) complete(__comp_inst);
+            if (run == RUN_NONE && !stop) {
+                move_halt_set(0);
+                state_set(ST_STANDSTILL);
+            }
+            break;
+        }
+        if (run == RUN_STOP && profile_step(__comp_inst, dt)) run = RUN_NONE;
+        /* MC_Stop: Done at standstill while stop is held (the state stays
+         * Stopping), Standstill on release (P1 MC_Stop) */
+        if (run == RUN_NONE && busy) complete(__comp_inst);
+        if (run == RUN_NONE && !stop) state_set(ST_STANDSTILL);
+        break;
+
+    case ST_ERROR_STOP:
+        if (ex_edge || halt_edge || home_edge) cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;
+        drive_home_set(0);
+        if (!power || !stat_op_enabled) {
+            /* nothing to decelerate: the drive is off, follow it */
+            pos_cmd_set(pos_fb); v = 0.0; a_cur = 0.0; run = RUN_NONE;
+        } else if (run == RUN_STOP && profile_step(__comp_inst, dt)) {
+            run = RUN_NONE;
+        }
+        if (reset_edge) reset_req = 1;
+        if (!reset) reset_req = reset_req && drv_fault ? 0 : reset_req;
+        if (reset_req && !drv_fault && v == 0.0) {
+            reset_req = 0;
+            err_latched = 0;
+            run = RUN_NONE;
+            pos_cmd_set(pos_fb);   /* resync: MC_Reset starts from the actual position */
+            if (drive_profile) move_halt_set(0);
+            state_set((power && cfg && stat_op_enabled) ? ST_STANDSTILL : ST_DISABLED);
+            /* MC_Reset has a Done output (PLCopen Part 1): raise it the same
+             * way motion completion does, cleared on the next Execute */
+            done_set(1); term_shown = 0; done_id_set(command_id);
+        }
+        break;
+
+    default:  /* SynchronizedMotion is not produced; anything else is a bug */
+        to_errorstop(__comp_inst, E_COMMAND_NOT_ALLOWED_IN_STATE);
+        break;
+    }
+
+    fault_reset_out_set((state == ST_ERROR_STOP) && reset_req);
+    vel_cmd_set(v);
+
+    /* ---- following error: always on while the drive is powered */
+    ferror_set(pos_cmd - pos_fb);
+    if (!drive_profile   /* drive-profile: pos-cmd is the target, the drive's 0x6065 guards */
+        && state != ST_DISABLED && state != ST_ERROR_STOP && state != ST_HOMING
+        && stat_op_enabled && fabs(ferror) > ferror_max) {
+        to_errorstop(__comp_inst, E_FOLLOWING_ERROR_OVER_LIMIT);
+    }
+
+    /* PLCopen Part 1, 2.4.1: Busy, Done, Error, CommandAborted exclusive in every period.
+     * The newest outcome owns the outputs (see ONE MULTIPLEXED FB above). */
+    error_set((err_latched != 0) || (cmd_err != 0));
+    if (error) { busy_set(0); active_set(0); done_set(0); command_aborted_set(0); }
+    else if (busy || done) command_aborted_set(0);
+    if (busy) done_set(0);
+    error_id_set(cmd_err ? cmd_err : err_latched);
+    /* a command that just started running is tracked by its number; a refusal
+     * of this period's command resolves it as failed */
+    if (busy && !run_id) run_id = command_id;
+    if (cmd_err && (ex_edge || halt_edge || stop_edge || home_edge || reset_edge || set_edge)) failed_id_set(command_id);
+    axis_error_id_set(err_latched);
+
+    actual_position_set(pos_fb + off);
+    torque_fb_set((double)drv_torque);
+    velocity_fb_set(drv_velocity);
+    statusword_set(drv_statusword);
+}
