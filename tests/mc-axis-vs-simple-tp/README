@@ -1,6 +1,6 @@
 simple_tp and mc_axis side by side: both in one thread, one target (a step
 plus a ramp moving inside the thread), one enable, one maxvel/maxaccel.
-mc_axis runs in track mode (mode 3), wired as in "REPLACING SIMPLE_TP" of
+mc_axis runs as a virtual axis in track mode (mode 3), wired as in "REPLACING SIMPLE_TP" of
 mc_axis(9); sampler records every period of both planners.
 
 Inputs: steps from rest, a reversal while moving, enable 0 in the middle of a
