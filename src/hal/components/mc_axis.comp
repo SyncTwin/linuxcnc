@@ -394,19 +394,111 @@ static void ramps_max(struct __comp_state *__comp_inst) {
  * rounds off to 0 exactly at vreq at jerk J (a^2 = 2 J dv, corrected by one
  * period), capped by cmd_acc while |v| rises and cmd_dec while it falls,
  * reached at rate J. */
-static void scurve_step(struct __comp_state *__comp_inst, double vreq, double dt) {
-    double rem = vreq - v, dj = cmd_jerk * dt, alim, areq;
+static void scurve_next(struct __comp_state *__comp_inst, double *pv, double *pa, double vreq, double dt) {
+    double rem = vreq - *pv, dj = cmd_jerk * dt, alim, areq;
     /* the last step lands on vreq: its acceleration is rem / dt, within one
      * jerk step of the last one, and the next period takes it to 0 */
-    if (fabs(rem) <= dj * dt && fabs(rem / dt - a_cur) <= dj) { v = vreq; a_cur = rem / dt; return; }
-    alim = (v == 0.0 || (v > 0.0) == (rem > 0.0)) ? cmd_acc : cmd_dec;
+    if (fabs(rem) <= dj * dt && fabs(rem / dt - *pa) <= dj) { *pv = vreq; *pa = rem / dt; return; }
+    alim = (*pv == 0.0 || (*pv > 0.0) == (rem > 0.0)) ? cmd_acc : cmd_dec;
     areq = -dj + sqrt(2.0 * cmd_jerk * fabs(rem) + dj * dj);
     if (areq > alim) areq = alim;
     if (rem < 0.0) areq = -areq;
-    if (areq > a_cur + dj) a_cur += dj;
-    else if (areq < a_cur - dj) a_cur -= dj;
-    else a_cur = areq;
-    v += a_cur * dt;
+    if (areq > *pa + dj) *pa += dj;
+    else if (areq < *pa - dj) *pa -= dj;
+    else *pa = areq;
+    *pv += *pa * dt;
+}
+
+static void scurve_step(struct __comp_state *__comp_inst, double vreq, double dt) {
+    scurve_next(__comp_inst, &v, &a_cur, vreq, dt);
+}
+
+#define STOP_STEPS_MAX 1000000
+
+/* Signed distance of the S-curve stop (scurve_next toward 0, period by
+ * period, position by the mean velocity) from velocity vv and acceleration
+ * aa: exactly the stop the profile runs.  The stretch at the deceleration cap
+ * is summed in closed form, the jerk stretches period by period: the cost is
+ * about 3 cmd_dec / (cmd_jerk dt) steps.  STOP_STEPS_MAX only guards against
+ * a hang: a longer stop counts as one that does not fit (1e300). */
+static double stop_dist(struct __comp_state *__comp_inst, double vv, double aa, double dt) {
+    double d = 0.0, vo, dj = cmd_jerk * dt, sg, nn;
+    /* below vth the rounding law asks for less than the cap cmd_dec */
+    double vth = ((cmd_dec + dj) * (cmd_dec + dj) - dj * dj) / (2.0 * cmd_jerk);
+    long n = 0;
+    while (vv != 0.0 || aa != 0.0) {
+        if (++n > STOP_STEPS_MAX) return vv >= 0.0 ? 1e300 : -1e300;
+        sg = vv > 0.0 ? 1.0 : -1.0;
+        if (aa == -sg * cmd_dec && sg * vv >= vth) {
+            nn = floor((sg * vv - vth) / (cmd_dec * dt)) + 1.0;
+            d += sg * (nn * sg * vv * dt - 0.5 * cmd_dec * dt * dt * nn * nn);
+            vv -= sg * nn * cmd_dec * dt;
+            continue;
+        }
+        vo = vv;
+        scurve_next(__comp_inst, &vv, &aa, 0.0, dt);
+        d += 0.5 * (vo + vv) * dt;
+    }
+    return d;
+}
+
+/* Slack left by one period toward the ramp target dir * w: the distance to
+ * the target after the period minus the S-curve stop from there (< 0: the
+ * stop would pass the target).  The period's velocity and acceleration go
+ * to *pv, *pa. */
+static double scurve_slack(struct __comp_state *__comp_inst, double d, int dir, double w,
+                           double dt, double *pv, double *pa) {
+    double vold = v;
+    *pv = v; *pa = a_cur;
+    scurve_next(__comp_inst, pv, pa, dir * w, dt);
+    return dir * (d - 0.5 * (vold + *pv) * dt - stop_dist(__comp_inst, *pv, *pa, dt));
+}
+
+/* One period of a position move with a jerk limit (track mode): the S-curve
+ * of scurve_next toward +-cmd_vel (the rounding law a^2 = 2 J dv of nextAccel()
+ * in simple_tp.c) as long as the S-curve stop after this period still ends at
+ * or before the target; heading away from the target, the ramp passes
+ * through v = 0 at full deceleration, as in simple_tp.c.  Otherwise the
+ * fastest ramp target w in [0, cmd_vel] whose stop still fits, by regula
+ * falsi (Illinois) on the slack, keeping a w that fits; w = 0 is the stop
+ * that the previous period checked.  The stop is the one the profile runs
+ * (stop_dist), so a standing target is never passed; with nothing that fits
+ * (the target moved closer than the stop) the axis brakes as hard as it
+ * may.  The search ends when the slack is below 0.5 J dt^3, the remainder
+ * that the axis covers in one period from rest.  Returns 1 at rest at the
+ * target. */
+#define SOLVE_STEPS 30
+static int scurve_pos_step(struct __comp_state *__comp_inst, double dt) {
+    double d = tgt - pos_cmd, dj = cmd_jerk * dt, tol = 0.5 * dj * dt * dt, vold = v;
+    double nv, na, lv, la, lo, hi, w, flo, fhi, fw, slo;
+    int dir = d > 0.0 ? 1 : -1, i, side = 0;
+    if (v == 0.0 && a_cur == 0.0 && fabs(d) <= tol) {
+        pos_cmd_set(tgt);
+        return 1;
+    }
+    fhi = scurve_slack(__comp_inst, d, dir, cmd_vel, dt, &nv, &na);
+    if (fhi < 0.0) {
+        lo = 0.0; hi = cmd_vel;
+        slo = flo = scurve_slack(__comp_inst, d, dir, 0.0, dt, &lv, &la);
+        for (i = 0; slo > tol && i < SOLVE_STEPS && hi - lo > 1e-12 * cmd_vel; i++) {
+            w = (lo * fhi - hi * flo) / (fhi - flo);
+            if (!(w > lo && w < hi)) w = 0.5 * (lo + hi);
+            fw = scurve_slack(__comp_inst, d, dir, w, dt, &nv, &na);
+            if (fw >= 0.0) {
+                lo = w; slo = flo = fw; lv = nv; la = na;
+                if (side == 1) fhi *= 0.5;
+                side = 1;
+            } else {
+                hi = w; fhi = fw;
+                if (side == -1) flo *= 0.5;
+                side = -1;
+            }
+        }
+        nv = lv; na = la;
+    }
+    v = nv; a_cur = na;
+    pos_cmd_set(pos_cmd + 0.5 * (vold + v) * dt);
+    return 0;
 }
 
 /* One period of the profile.  Position move: the velocity that still stops
@@ -417,6 +509,7 @@ static void scurve_step(struct __comp_state *__comp_inst, double vreq, double dt
 static int profile_step(struct __comp_state *__comp_inst, double dt) {
     double dd = cmd_dec * dt, vreq, vold = v, d, r, q;
     int fin = 0;
+    if (run == RUN_POS && cmd_jerk > 0.0) return scurve_pos_step(__comp_inst, dt);
     if (run == RUN_POS) {
         d = tgt - pos_cmd;
         if (fabs(d) <= 0.5 * dd * dt && fabs(v) <= dd) {
@@ -520,8 +613,11 @@ static int accept_move(struct __comp_state *__comp_inst, int update) {
     /* drive-profile: velocity moves need PV, not implemented yet; the drive
      * takes one set-point per move, nothing to track */
     if (drive_profile && (m == 2 || m == MODE_TRACK)) { cmd_err = E_UNKNOWN_MODE; return 0; }
-    /* refused, not ignored: the S-curve is a velocity-move ramp; pp has one ramp */
-    if (jerk > 0.0 && (m != 2 || drive_profile)) { cmd_err = E_INVALID_LIMITS_OR_PARAMETERS; return 0; }
+    /* refused, not ignored: the S-curve is implemented for velocity moves and
+     * track mode, not for absolute/relative moves; pp has one ramp */
+    if (jerk > 0.0 && ((m != 2 && m != MODE_TRACK) || drive_profile)) {
+        cmd_err = E_INVALID_LIMITS_OR_PARAMETERS; return 0;
+    }
     if (drive_profile && deceleration > 0.0 && deceleration != acc) {
         cmd_err = E_INVALID_LIMITS_OR_PARAMETERS; return 0;
     }
