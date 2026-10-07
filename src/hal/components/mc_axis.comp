@@ -332,6 +332,9 @@ variable int cu_mode;       // mode taken at the execute edge
 variable double cu_base;    // drive-frame position at the execute edge (relative moves)
 variable int move_armed;    // drive-profile: drv-move-done seen 0 since the set-point (a halt keeps it:
                             // done already 1 at the halt means the drive stands)
+variable int sp_hs;         // drive-profile set-point handshake (statusword bit 12): 0 the drive takes a
+                            // new set-point, 1 waiting for ack 1, 2 waiting for ack 0
+variable int sp_pending;    // drive-profile + ContinuousUpdate: updated values not yet handed to the drive
 
 function _;
 ;;
@@ -459,6 +462,7 @@ static void end_command(struct __comp_state *__comp_inst, int aborted) {
     }
     busy_set(0); active_set(0); in_velocity_set(0); in_position_set(0);
     cu_run = 0;   /* ContinuousUpdate ends with the move (P1 2.4.6) */
+    sp_pending = 0;
 }
 
 /* A command finished: Done only when it still owns the outputs (busy) -
@@ -481,18 +485,31 @@ static void to_errorstop(struct __comp_state *__comp_inst, int id) {
     ramps_max(__comp_inst);
 }
 
+/* drive-profile: hand the move (pos-cmd = target, velocity, acceleration) to
+ * the drive as a new set-point, one period of move-execute.  done counts only
+ * after drv-move-done was seen 0 since this set-point. */
+static void sp_send(struct __comp_state *__comp_inst) {
+    pos_cmd_set(tgt);
+    move_velocity_set(cmd_vel);
+    move_acceleration_set(cmd_acc);
+    move_halt_set(0);
+    move_execute_set(1);
+    move_armed = 0;
+    sp_hs = 1;
+    sp_pending = 0;
+}
+
 /* Accept a move command (update = 0, at the execute edge) or re-read the
  * inputs of the running one (update = 1, ContinuousUpdate: mode and the
  * relative base stay those of the edge); returns 0 and sets cmd_err when
  * refused. */
 static int accept_move(struct __comp_state *__comp_inst, int update) {
     double t, lo = min_limit - off, hi = max_limit - off;   /* soft limits in the drive frame */
+    double base = pos_cmd;   /* where a relative move starts (drive-profile moves pos-cmd below) */
     int m = update ? cu_mode : mode;
     if (!update) {
         if (buffer_mode != 0) { cmd_err = E_BUFFER_MODE_NOT_IMPLEMENTED; return 0; }
         if (m < 0 || m > MODE_TRACK) { cmd_err = E_UNKNOWN_MODE; return 0; }
-        /* the drive gets one set-point per move: nothing to update */
-        if (drive_profile && continuous_update) { cmd_err = E_INVALID_LIMITS_OR_PARAMETERS; return 0; }
     }
     double acc = acceleration > 0.0 && acceleration < maxa ? acceleration : maxa;   /* 0 = axis default */
     if (acceleration < 0.0 || maxa <= 0.0 || deceleration < 0.0 || jerk < 0.0) {
@@ -530,17 +547,21 @@ static int accept_move(struct __comp_state *__comp_inst, int update) {
         run = RUN_POS;
         state_set(m == MODE_TRACK ? ST_SYNCHRONIZED_MOTION : ST_DISCRETE_MOTION);
         if (drive_profile) {
-            /* hand the whole move to the drive: target, velocity, acceleration */
-            pos_cmd_set(tgt);
-            move_velocity_set(cmd_vel);
-            move_acceleration_set(cmd_acc);
-            move_halt_set(0);
-            move_execute_set(1);
-            move_armed = 0;
+            /* hand the whole move to the drive.  ContinuousUpdate: changed
+             * values are a new set-point that replaces the running one (cia402
+             * sets controlword bit 5, change set immediately, with bit 4),
+             * handed over only once the drive has acknowledged the previous
+             * set-point (statusword bit 12 rose and fell again): a set-point
+             * raised while bit 4 is still high would not be taken */
+            if (!update) sp_send(__comp_inst);
+            else {
+                sp_pending = tgt != pos_cmd || cmd_vel != move_velocity || cmd_acc != move_acceleration;
+                if (sp_pending && sp_hs == 0) sp_send(__comp_inst);
+            }
         }
     }
     /* track mode re-reads its inputs every period by definition */
-    if (!update) { cu_run = continuous_update || m == MODE_TRACK; cu_mode = m; cu_base = pos_cmd; }
+    if (!update) { cu_run = continuous_update || m == MODE_TRACK; cu_mode = m; cu_base = base; }
     return 1;
 }
 
@@ -664,6 +685,9 @@ FUNCTION(_) {
     case ST_SYNCHRONIZED_MOTION:
         if (drive_profile) {
             /* the drive runs the profile; the axis follows its handshake */
+            int ack = (drv_statusword >> 12) & 1;   /* PP set-point acknowledge */
+            if (sp_hs == 1 && ack) sp_hs = 2;
+            else if (sp_hs == 2 && !ack) sp_hs = 0;
             if (stop_edge) {
                 end_command(__comp_inst, 1);
                 busy_set(1); active_set(1);
@@ -682,14 +706,31 @@ FUNCTION(_) {
             } else if (home_edge) {
                 cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;
             }
+            /* ContinuousUpdate (P1 2.4.6): changed inputs become a new set-point */
+            if (!continuous_update) cu_run = 0;
+            if (cu_run && !ex_edge && run == RUN_POS && !accept_move(__comp_inst, 1)) {
+                /* the updated move would be refused: the drive halts, the move ends with that Error */
+                if (run_id) { failed_id_set(run_id); run_id = 0; }
+                busy_set(0); active_set(0); cu_run = 0; sp_pending = 0;
+                term_shown = 0;
+                run = RUN_STOP; move_halt_set(1); state_set(ST_DISCRETE_MOTION);
+            }
             if (!drv_move_done) {
                 move_armed = 1;
             } else if (move_armed) {
-                if (run == RUN_STOP) pos_cmd_set(pos_fb);   /* halted short of the target */
-                move_halt_set(0);
-                complete(__comp_inst);
-                run = RUN_NONE;
-                state_set(ST_STANDSTILL);
+                /* cia402 pp-done is ack 0 and target reached: the handshake is over */
+                sp_hs = 0;
+                if (sp_pending && run == RUN_POS) {
+                    /* the drive reached the set-point before the update could be
+                     * handed over: the newer one starts from there, no Done yet */
+                    sp_send(__comp_inst);
+                } else {
+                    if (run == RUN_STOP) pos_cmd_set(pos_fb);   /* halted short of the target */
+                    move_halt_set(0);
+                    complete(__comp_inst);
+                    run = RUN_NONE;
+                    state_set(ST_STANDSTILL);
+                }
             }
             break;
         }
