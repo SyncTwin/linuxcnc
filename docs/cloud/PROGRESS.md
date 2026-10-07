@@ -61,3 +61,27 @@
 | pp-accel → 0x6083/0x6084 | :154, :648–649 | нет |
 | pp-halt → cw bit 8 | :152, :667 | нет |
 | opmode 1 (PP) | :644, param pp-mode :183 | нет |
+
+## Шаг 2b — PP + ContinuousUpdate в mc_axis (готово)
+- Коммиты: 2d363f8d (mc_axis), f978f0bd (tests).
+- Решение (без правки cia402): continuous-update при drive-profile = 1 больше не отказ. Изменившиеся
+  position/velocity/acceleration → новый set-point (pos-cmd, move-velocity, move-acceleration, 1 период
+  move-execute); cia402.comp поднимает его с bit 5 (:658) → заменяет текущий.
+- Рукопожатие: новый set-point только после того, как бит 12 0x6041 (берётся из уже существующего пина
+  drv-statusword) поднялся и опустился после предыдущего — обход пробела cia402.comp :653–661.
+  Пока рукопожатие не закончено, обновление «отложено» (sp_pending) и уходит, как только ack = 0.
+- drv-move-done / armed: move_armed сбрасывается в 0 при КАЖДОМ новом set-point (как и при фронте);
+  done засчитывается только после drv-move-done = 0 после последнего set-point → устаревшая 1 от старой
+  цели не даёт Done. Если привод дошёл до старого set-point, а обновление ещё отложено, Done не
+  выставляется: отложенный set-point уходит с места остановки (pp-done по :665 = ack 0, рукопожатие
+  закончено). Без проводки drv-statusword обновления так и доходят — по одному после каждого pp-done.
+- Ошибка relative + drive-profile исправлена попутно: cu_base брался ПОСЛЕ pos_cmd = tgt.
+- Остаётся отказом (ошибка 7): jerk > 0 и deceleration ≠ acceleration при drive-profile = 1 — источник
+  код cia402.comp: нет пина рывка, 0x6084 = 0x6083 (:649).
+- Тест (tests/mc-axis, ось px): заглушка = виртуальный mc_axis drv в track mode (профиль привода, берёт
+  новый set-point сразу), бит 12 = oneshot 50 мс от move-execute, drv-move-done = in-position И НЕ ack
+  (как :665). 8 новых проверок.
+- Результаты: с правкой `runtests tests/mc-axis` 1/1, 43 строки ok (было 35), 3 прогона подряд — все прошли.
+- Обратный прогон (`/root/reverse.sh tests/mc-axis`: только mc_axis.comp ← f759789d, make, тест, возврат):
+  исходный — 0/1, 31 ok, затем
+  `FAIL: drive-profile ContinuousUpdate: accepted, no error 7`; с правкой — 1/1, 43 ok.
