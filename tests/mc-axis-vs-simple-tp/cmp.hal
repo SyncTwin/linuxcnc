@@ -5,7 +5,7 @@ loadrt sum2 names=tgt
 loadrt not names=halt
 loadrt simple_tp
 loadrt mc_axis names=mt
-# target stp-pos stp-vel mt-pos mt-vel maxvel maxaccel en stp-active mt-in-sync mt-busy phase
+# target stp-pos stp-vel mt-pos mt-vel maxvel maxaccel en stp-active mt-in-position mt-busy phase
 loadrt sampler depth=20000 cfg=fffffffbbbbs
 addf ramp t
 addf tgt t
@@ -35,7 +35,7 @@ net stp-act  simple-tp.0.active      => sampler.0.pin.8
 net mt-halt  halt.out   => mt.halt
 net mt-pos   mt.pos-cmd => sampler.0.pin.3
 net mt-vel   mt.vel-cmd => sampler.0.pin.4
-net mt-sync  mt.in-sync => sampler.0.pin.9
+net mt-sync  mt.in-position => sampler.0.pin.9
 net mt-busy  mt.busy    => sampler.0.pin.10
 net phase    => sampler.0.pin.11
 setp mt.virtual 1

@@ -73,7 +73,7 @@ def target(t):
 def at_rest():
     beat(3)
     wait(lambda: not g("simple-tp.0.active")
-         and (g("mt.in-sync") or not g("mt.busy")))
+         and (g("mt.in-position") or not g("mt.busy")))
     beat(3)
 
 
