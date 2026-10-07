@@ -197,6 +197,52 @@ check(g("pos-cmd", "fx") == held, "follow: after Done a moving target needs a ne
 release("execute", "fx")
 s("power", 0, "fx")
 
+# drive-profile = 1 with ContinuousUpdate: a changed target or velocity is a
+# new set-point handed to the drive while it moves (change set immediately),
+# once the drive has acknowledged the previous one; Done comes once, at the
+# updated target
+s("power", 1, "drv")
+s("power", 1, "px")
+wait(lambda: g("state", "px") == STANDSTILL and g("state", "drv") == STANDSTILL)
+s("mode", 0, "px"); s("continuous-update", 1, "px")
+s("position", 80, "px"); s("velocity", 20, "px")
+pid = edge("execute", "px")
+wait(lambda: g("move-velocity", "px") > 0 or g("error", "px"))
+check(not g("error", "px") and g("busy", "px") and g("failed-id", "px") != pid,
+      "drive-profile ContinuousUpdate: accepted, no error 7")
+edge("execute", "drv")   # the stub drive starts planning once it has a profile velocity
+wait(lambda: g("actual-position", "px") >= 20 or g("error", "px"))
+s("position", 40, "px"); s("velocity", 30, "px")
+wait(lambda: g("pos-cmd", "px") == 40 or g("error", "px"))
+moving = abs(g("vel-cmd", "drv"))
+check(g("pos-cmd", "px") == 40 and moving > 0 and g("busy", "px"),
+      "drive-profile ContinuousUpdate: new set-point handed over while the drive moves")
+s("position", 50, "px")
+beat(4)
+check(g("pos-cmd", "px") == 40,
+      "drive-profile ContinuousUpdate: no set-point before the previous one is acknowledged")
+dones, last, pmax, vmax = 0, 0, 0.0, 0.0
+while g("done-id", "px") != pid:
+    d = g("done", "px")
+    dones += d and not last
+    last = d
+    pmax = max(pmax, g("actual-position", "px"))
+    vmax = max(vmax, abs(g("vel-cmd", "drv")))
+    if g("error", "px"):
+        break
+    time.sleep(0.001)
+check(g("pos-cmd", "px") == 50, "drive-profile ContinuousUpdate: the held update is handed over after the acknowledge")
+check(dones == 0 and g("done", "px") and abs(g("actual-position", "px") - 50) < 1e-9 and pmax <= 50 + 1e-9,
+      "drive-profile ContinuousUpdate: Done at the updated target, the old one (80) not approached")
+check(20 + 1e-9 < vmax <= 30 + 1e-9, "drive-profile ContinuousUpdate: the updated velocity is taken")
+check(g("command-id", "px") == pid and g("aborted-id", "px") != pid and not g("error", "px"),
+      "drive-profile ContinuousUpdate: same command, not aborted")
+beat(50)
+check(g("done-id", "px") == pid and g("done", "px") and g("state", "px") == STANDSTILL
+      and g("actual-position", "px") == 50, "drive-profile ContinuousUpdate: Done once, the axis stands")
+release("execute", "px")
+s("power", 0, "px"); s("power", 0, "drv")
+
 # drive fault: ErrorStop, then MC_Reset
 s("drv-fault", 1)
 wait(lambda: g("state") == ERRORSTOP)

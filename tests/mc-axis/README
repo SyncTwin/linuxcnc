@@ -13,6 +13,10 @@ outputs with hal.get_p():
  - ContinuousUpdate (P1 2.4.6): the standard's MoveRelative example, taken
    only at the Execute edge, ended by its fall, refused update = Error;
    a second axis follows a target that moves every period (simple_tp use)
+ - drive-profile = 1 with ContinuousUpdate on a stub of cia402 pp-mode and the
+   drive (a virtual mc_axis in track mode, statusword bit 12 from a oneshot):
+   a changed target and velocity are a new set-point while the drive moves,
+   held until the previous one is acknowledged; Done once, at the new target
  - drive fault -> ErrorStop (error-id 3, axis-error-id 3); MC_Reset -> Standstill
  - power off -> Disabled
 
