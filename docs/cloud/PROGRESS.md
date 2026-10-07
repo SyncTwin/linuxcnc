@@ -127,3 +127,10 @@
 | tests/mc-axis (43 проверки) | 0/1, 31 ok, `FAIL: drive-profile ContinuousUpdate: accepted (px error-id 7)` | 1/1, 43 ok |
 | tests/mc-axis-vs-simple-tp | 0/1, 1 ok, `FAIL: mc_axis refused the jerk in track mode (error-id 7)` | 1/1, 2 ok |
 | tests/mc-axis-vs-simple-tp, новый закон + старая защёлка | 0/1, `FAIL: jerk -7186.0 over maxjerk 5000.0 at period 19858, phase 16 (step +0.000017)` | 1/1 |
+
+## Шаг 5 — man-страница (готово)
+- Коммит 028aef93: TRACK MODE (jerk принимается, отставание с jerk), DRIVE PROFILE (что остаётся отказом и
+  почему), ACCELERATION/DECELERATION/JERK (закон, «не проходит стоящую цель», цена ∝ dec/(jerk·period)),
+  CONTINUOUSUPDATE (новый set-point, рукопожатие по биту 12 drv-statusword, без проводки — по одному после
+  каждого pp-done), описания пинов jerk и drv-statusword, строка max_jerk в таблице REPLACING SIMPLE_TP.
+- Оба теста после правки man: 1/1 и 1/1.
