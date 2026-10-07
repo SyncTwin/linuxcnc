@@ -9,12 +9,12 @@ import time
 DISABLED, STANDSTILL, DISCRETE, CONTINUOUS, ERRORSTOP = 0, 1, 3, 4, 7
 
 
-def g(pin):
-    return hal.get_p("ax." + pin)
+def g(pin, ax="ax"):
+    return hal.get_p(ax + "." + pin)
 
 
-def s(pin, value):
-    hal.set_p("ax." + pin, str(value))
+def s(pin, value, ax="ax"):
+    hal.set_p(ax + "." + pin, str(value))
 
 
 def wait(cond):
@@ -29,12 +29,12 @@ def check(cond, msg):
     print("ok: " + msg)
 
 
-def edge(pin):
+def edge(pin, ax="ax"):
     """Rising edge on a command input; returns the command's number."""
-    old = g("command-id")
-    s(pin, 1)
-    wait(lambda: g("command-id") != old)
-    return g("command-id")
+    old = g("command-id", ax)
+    s(pin, 1, ax)
+    wait(lambda: g("command-id", ax) != old)
+    return g("command-id", ax)
 
 
 def beat(n=2):
@@ -43,10 +43,10 @@ def beat(n=2):
     wait(lambda: hal.get_p("t.threadbeat") - b >= n)
 
 
-def release(pin):
+def release(pin, ax="ax"):
     """Drop a command input and let the axis see it low, so that the next
     edge on it is a new edge."""
-    s(pin, 0)
+    s(pin, 0, ax)
     beat()
 
 
@@ -119,6 +119,83 @@ hid = edge("halt")
 wait(lambda: g("done-id") == hid)
 check(g("aborted-id") == cid and g("state") == STANDSTILL, "MoveVelocity halted")
 release("execute"); release("halt")
+
+# ContinuousUpdate (PLCopen Part 1 v2.0, 2.4.6), the standard's own example:
+# a MoveRelative takes a new Distance and Velocity while it runs, without a
+# new Execute edge, and ends Done at the new distance from where it started
+cid = move(0, 0)
+wait(lambda: g("done-id") == cid)
+release("execute")
+s("continuous-update", 1)
+cid = move(1, 60, velocity=20)
+wait(lambda: g("actual-position") >= 30)
+s("position", 90); s("velocity", 40)
+vmax = 0.0
+while g("done-id") != cid:
+    vmax = max(vmax, abs(g("vel-cmd")))
+    time.sleep(0.001)
+check(abs(g("actual-position") - 90) < 1e-9, "ContinuousUpdate: relative move ends at the updated distance")
+check(20 + 1e-9 < vmax <= 40 + 1e-9, "ContinuousUpdate: the updated velocity is taken")
+check(g("command-id") == cid and g("aborted-id") != cid, "ContinuousUpdate: same command, not aborted")
+s("position", 0)
+beat(10)
+check(g("done") and g("actual-position") == 90 and g("state") == STANDSTILL, "ContinuousUpdate: no new values after Done")
+release("execute")
+
+# ContinuousUpdate is taken at the Execute edge: set later, it changes nothing
+s("continuous-update", 0)
+cid = move(0, 50, velocity=20)
+wait(lambda: g("actual-position") < 70)
+s("continuous-update", 1); s("position", 10)
+wait(lambda: g("done-id") == cid)
+check(abs(g("actual-position") - 50) < 1e-9, "ContinuousUpdate 0 at the edge: change ignored")
+release("execute")
+
+# ContinuousUpdate falling ends the update for the rest of the move
+cid = move(0, 10, velocity=20)
+wait(lambda: g("actual-position") < 40)
+s("continuous-update", 0); s("position", 0)
+wait(lambda: g("done-id") == cid)
+check(abs(g("actual-position") - 10) < 1e-9, "ContinuousUpdate falling: the move keeps its target")
+release("execute")
+
+# an updated target outside the soft limits ends the move with error-id 5
+s("continuous-update", 1)
+cid = move(0, 60, velocity=20)
+wait(lambda: g("actual-position") > 20)
+s("position", 200)
+wait(lambda: g("failed-id") == cid)
+check(g("error") and g("error-id") == 5 and not g("busy"), "ContinuousUpdate outside limits: error-id 5")
+wait(lambda: g("state") == STANDSTILL)
+check(20 < g("actual-position") < 60, "ContinuousUpdate outside limits: halted")
+release("execute"); s("continuous-update", 0)
+wait(lambda: not g("error"))
+
+# following a target that moves every period (the simple_tp use): fx.position
+# is ramp.out, which rises at ramp.in units/s inside the thread
+s("power", 1, "fx")
+wait(lambda: g("state", "fx") == STANDSTILL)
+s("mode", 0, "fx"); s("continuous-update", 1, "fx")
+hal.set_p("ramp.in", "20")
+beat(3)
+fid = edge("execute", "fx")
+wait(lambda: g("actual-position", "fx") >= 40)
+check(g("busy", "fx") and g("state", "fx") == DISCRETE and g("command-id", "fx") == fid,
+      "follow: one command follows the moving target")
+check(abs(g("vel-cmd", "fx") - 20) < 0.5, "follow: at the target's velocity")
+lag = hal.get_p("ramp.out") - g("pos-cmd", "fx")
+check(0 < lag < 2, "follow: lags the target by about v^2/2a (%.3f)" % lag)
+hal.set_p("ramp.in", "0")
+wait(lambda: g("done-id", "fx") == fid)
+check(g("pos-cmd", "fx") == hal.get_p("ramp.out") and g("aborted-id", "fx") != fid,
+      "follow: Done at the target where it stopped")
+held = g("pos-cmd", "fx")
+hal.set_p("ramp.in", "20")
+beat(50)
+hal.set_p("ramp.in", "0")
+check(g("pos-cmd", "fx") == held, "follow: after Done a moving target needs a new Execute edge")
+release("execute", "fx")
+s("power", 0, "fx")
 
 # drive fault: ErrorStop, then MC_Reset
 s("drv-fault", 1)

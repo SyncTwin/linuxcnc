@@ -10,6 +10,9 @@ outputs with hal.get_p():
  - a target outside the soft limits is refused (error-id 5) without motion
  - MC_SetPosition shifts actual-position without motion
  - MC_MoveRelative, MC_MoveVelocity + MC_Halt
+ - ContinuousUpdate (P1 2.4.6): the standard's MoveRelative example, taken
+   only at the Execute edge, ended by its fall, refused update = Error;
+   a second axis follows a target that moves every period (simple_tp use)
  - drive fault -> ErrorStop (error-id 3, axis-error-id 3); MC_Reset -> Standstill
  - power off -> Disabled
 

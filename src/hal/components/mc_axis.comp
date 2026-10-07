@@ -93,6 +93,28 @@ move with jerk > 0 is refused (error 7), not ignored; so is drive-profile
 with a jerk or a deceleration different from acceleration.  MC_Stop and
 ErrorStop brake at maxa without a jerk limit.
 
+CONTINUOUSUPDATE (pin *continuous-update*, PLCopen Part 1 v2.0, 2.4.6):
+taken with the rising edge of execute.  When it is 1 at that edge, the
+running move re-reads position, velocity, acceleration, deceleration and
+jerk every period, for as long as continuous-update stays 1 and the move
+runs: no new command number, no CommandAborted; the move is re-planned
+from the current position and velocity, as an mcAborting command would be.
+A relative distance stays measured from where the move started.  Mode and
+buffer-mode are kept from the edge.  The update ends for good when
+continuous-update falls or the move ends; once a position move is Done it
+takes no more values until the next execute edge.  An updated value that
+would be refused at an edge (target outside the soft limits, velocity
+<= 0, jerk on a position move) halts the move with that error-id.  With
+drive-profile = 1 continuous-update is refused (error 7).
+
+FOLLOWING A TARGET (what *simple_tp*(9) does): mode 0, continuous-update
+1, execute held, position wired to the moving target.  The axis plans to
+stop at the target every period, like simple_tp, so it lags a moving target
+by about v^2 / (2 deceleration).  Unlike simple_tp, a target that the axis
+reaches and holds ends the move (Done): a target that moves again after
+that needs a new execute edge (PLCopen 2.4.6).  A target outside the soft
+limits is an error, not clipped (*limit3*(9) clips it).
+
 CONTINUOUS AXIS (pin *limits-enable* = 0): a modulo axis without soft
 limits; min-limit/max-limit are not checked, a velocity move runs until
 halt/stop; maxv, maxa and ferror-max stay in force.
@@ -159,6 +181,7 @@ pin in real acceleration "acceleration of the move (|v| rising), capped by maxa;
 pin in real deceleration "deceleration of the move (|v| falling), capped by maxa; 0 = acceleration";
 pin in real jerk "jerk limit of the move; 0 = none (trapezoid), > 0 = S-curve (velocity moves only)";
 pin in sint mode "0 absolute, 1 relative, 2 velocity (set-position: 0 absolute, 1 relative)";
+pin in bool continuous_update "PLCopen ContinuousUpdate: 1 at the execute edge makes the running move follow position/velocity/acceleration/deceleration/jerk every period while it stays 1";
 pin in sint buffer_mode "index in BUFFER_MODES; only 0 (mcAborting) implemented";
 
 // ---- limits, as in [JOINT_n] of a machine config
@@ -237,6 +260,9 @@ variable int home_old;
 variable int set_old;
 variable double off;        // MC_SetPosition offset: axis position = drive position (pos-fb) + off
 variable int home_started;  // homing armed: stat-homed seen 0 since the request
+variable int cu_run;        // ContinuousUpdate in force for the running move
+variable int cu_mode;       // mode taken at the execute edge
+variable double cu_base;    // drive-frame position at the execute edge (relative moves)
 variable int move_armed;    // drive-profile: drv-move-done seen 0 since the set-point (a halt keeps it:
                             // done already 1 at the halt means the drive stands)
 
@@ -348,6 +374,7 @@ static void end_command(struct __comp_state *__comp_inst, int aborted) {
         run_id = 0;
     }
     busy_set(0); active_set(0); in_velocity_set(0);
+    cu_run = 0;   /* ContinuousUpdate ends with the move (P1 2.4.6) */
 }
 
 /* A command finished: Done only when it still owns the outputs (busy) -
@@ -370,26 +397,34 @@ static void to_errorstop(struct __comp_state *__comp_inst, int id) {
     ramps_max(__comp_inst);
 }
 
-/* Accept a move command; returns 0 and sets cmd_err when refused. */
-static int accept_move(struct __comp_state *__comp_inst) {
+/* Accept a move command (update = 0, at the execute edge) or re-read the
+ * inputs of the running one (update = 1, ContinuousUpdate: mode and the
+ * relative base stay those of the edge); returns 0 and sets cmd_err when
+ * refused. */
+static int accept_move(struct __comp_state *__comp_inst, int update) {
     double t, lo = min_limit - off, hi = max_limit - off;   /* soft limits in the drive frame */
-    if (buffer_mode != 0) { cmd_err = E_BUFFER_MODE_NOT_IMPLEMENTED; return 0; }
-    if (mode < 0 || mode > 2) { cmd_err = E_UNKNOWN_MODE; return 0; }
+    int m = update ? cu_mode : mode;
+    if (!update) {
+        if (buffer_mode != 0) { cmd_err = E_BUFFER_MODE_NOT_IMPLEMENTED; return 0; }
+        if (m < 0 || m > 2) { cmd_err = E_UNKNOWN_MODE; return 0; }
+        /* the drive gets one set-point per move: nothing to update */
+        if (drive_profile && continuous_update) { cmd_err = E_INVALID_LIMITS_OR_PARAMETERS; return 0; }
+    }
     double acc = acceleration > 0.0 && acceleration < maxa ? acceleration : maxa;   /* 0 = axis default */
     if (acceleration < 0.0 || maxa <= 0.0 || deceleration < 0.0 || jerk < 0.0) {
         cmd_err = E_INVALID_LIMITS_OR_PARAMETERS; return 0;
     }
     /* drive-profile: velocity moves need PV, not implemented yet */
-    if (drive_profile && mode == 2) { cmd_err = E_UNKNOWN_MODE; return 0; }
+    if (drive_profile && m == 2) { cmd_err = E_UNKNOWN_MODE; return 0; }
     /* refused, not ignored: the S-curve is a velocity-move ramp; pp has one ramp */
-    if (jerk > 0.0 && (mode != 2 || drive_profile)) { cmd_err = E_INVALID_LIMITS_OR_PARAMETERS; return 0; }
+    if (jerk > 0.0 && (m != 2 || drive_profile)) { cmd_err = E_INVALID_LIMITS_OR_PARAMETERS; return 0; }
     if (drive_profile && deceleration > 0.0 && deceleration != acc) {
         cmd_err = E_INVALID_LIMITS_OR_PARAMETERS; return 0;
     }
     cmd_acc = acc;
     cmd_dec = deceleration > 0.0 ? (deceleration < maxa ? deceleration : maxa) : cmd_acc;
     cmd_jerk = jerk;
-    if (mode == 2) {
+    if (m == 2) {
         t = velocity;
         if (t > maxv) t = maxv;
         if (t < -maxv) t = -maxv;
@@ -403,7 +438,7 @@ static int accept_move(struct __comp_state *__comp_inst) {
         state_set(ST_CONTINUOUS_MOTION);
     } else {
         if (velocity <= 0.0) { cmd_err = E_INVALID_LIMITS_OR_PARAMETERS; return 0; }
-        t = (mode == 0) ? position - off : pos_cmd + position;
+        t = (m == 0) ? position - off : (update ? cu_base : pos_cmd) + position;
         if (limits_enable && (t < lo || t > hi)) { cmd_err = E_SOFT_LIMIT; return 0; }
         tgt = t;
         cmd_vel = velocity < maxv ? velocity : maxv;
@@ -419,6 +454,7 @@ static int accept_move(struct __comp_state *__comp_inst) {
             move_armed = 0;
         }
     }
+    if (!update) { cu_run = continuous_update; cu_mode = m; cu_base = pos_cmd; }
     return 1;
 }
 
@@ -504,7 +540,7 @@ FUNCTION(_) {
             off = mode == 1 ? off + position : position - pos_fb;
             done_set(1); term_shown = 0; done_id_set(command_id);
         } else if (ex_edge) {
-            if (accept_move(__comp_inst)) { busy_set(1); active_set(1); }
+            if (accept_move(__comp_inst, 0)) { busy_set(1); active_set(1); }
         }
         break;
 
@@ -544,7 +580,7 @@ FUNCTION(_) {
             } else if (ex_edge) {
                 end_command(__comp_inst, 1);
                 command_aborted_set(0);
-                if (accept_move(__comp_inst)) { busy_set(1); active_set(1); }
+                if (accept_move(__comp_inst, 0)) { busy_set(1); active_set(1); }
                 else { run = RUN_STOP; move_halt_set(1); state_set(ST_DISCRETE_MOTION); }
             } else if (halt_edge) {
                 end_command(__comp_inst, 1);
@@ -573,7 +609,7 @@ FUNCTION(_) {
              * current position and velocity */
             end_command(__comp_inst, 1);
             command_aborted_set(0);
-            if (accept_move(__comp_inst)) { busy_set(1); active_set(1); }
+            if (accept_move(__comp_inst, 0)) { busy_set(1); active_set(1); }
             else { run = RUN_STOP; state_set(ST_DISCRETE_MOTION); }   /* refused: Error, not Busy */
         } else if (halt_edge) {
             /* MC_Halt: decelerate with the move's deceleration (and jerk);
@@ -585,6 +621,16 @@ FUNCTION(_) {
             cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;
         }
         if (state == ST_STOPPING) break;
+        /* ContinuousUpdate (P1 2.4.6): in force from the execute edge while
+         * the input stays 1; the move takes the current inputs every period */
+        if (!continuous_update) cu_run = 0;
+        if (cu_run && !ex_edge && !accept_move(__comp_inst, 1)) {
+            /* the updated move would be refused: the move ends with that Error */
+            if (run_id) { failed_id_set(run_id); run_id = 0; }
+            busy_set(0); active_set(0); in_velocity_set(0); cu_run = 0;
+            term_shown = 0;
+            run = RUN_STOP; state_set(ST_DISCRETE_MOTION);
+        }
         if (run == RUN_VEL && limits_enable) {
             /* a velocity move plans toward the soft limit it heads to; arriving
              * there is a soft-limit error, the profile has already stopped */
