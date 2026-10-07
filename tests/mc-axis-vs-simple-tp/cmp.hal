@@ -22,15 +22,16 @@ net target   tgt.out  => simple-tp.0.target-pos mt.position sampler.0.pin.0
 
 # simple_tp
 net en       => simple-tp.0.enable mt.execute halt.in sampler.0.pin.7
-net maxvel   => simple-tp.0.maxvel mt.velocity sampler.0.pin.5
-net maxaccel => simple-tp.0.maxaccel mt.acceleration sampler.0.pin.6
+net maxvel   => simple-tp.0.maxvel mt.velocity mt.maxv sampler.0.pin.5
+net maxaccel => simple-tp.0.maxaccel mt.acceleration mt.maxa sampler.0.pin.6
 net stp-pos  simple-tp.0.current-pos => sampler.0.pin.1
 net stp-vel  simple-tp.0.current-vel => sampler.0.pin.2
 net stp-act  simple-tp.0.active      => sampler.0.pin.8
 
 # mc_axis wired as in "REPLACING SIMPLE_TP" of mc_axis(9): a virtual axis
 # in track mode, the same four signals as simple_tp (target, enable,
-# maxvel, maxaccel above); power is set by cmp.py
+# maxvel, maxaccel above, maxvel/maxaccel also on maxv/maxa); power is set
+# by cmp.py
 net mt-halt  halt.out   => mt.halt
 net mt-pos   mt.pos-cmd => sampler.0.pin.3
 net mt-vel   mt.vel-cmd => sampler.0.pin.4
@@ -39,6 +40,7 @@ net mt-busy  mt.busy    => sampler.0.pin.10
 net phase    => sampler.0.pin.11
 setp mt.virtual 1
 setp mt.mode 3
+setp mt.limits-enable 0
 
 start
 loadusr -w ./cmp.py
