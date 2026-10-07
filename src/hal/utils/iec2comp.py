@@ -22,7 +22,8 @@ lib/ next to it, as the MATIEC build tree and Beremiz lay it out).  The generate
 .comp: Res.c with POUS.h/Cfg.h/POUS.c pasted in place of their #include (one source file per component);
 Cfg.c is not used, the component calls RES_init__/RES_run__ itself, one RESOURCE, one TASK per thread period.
 The MATIEC runtime headers (lib/C/*.h) are written next to the .comp; build with
-'halcompile --install -I<dir> iec_<prog>.comp' (or --compile).
+'halcompile --install <dir>/iec_<prog>.comp' (or --compile): halcompile adds the directory of the .comp
+to the include path.
 
 Pins of the component (instance <comp>.0):
   permit                 0 = the program is stopped and the outputs are at their -safe values
@@ -51,6 +52,7 @@ import argparse
 import functools
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -172,7 +174,10 @@ def iec2c(text: str) -> tuple[dict[str, str], dict[str, str]]:
             r = subprocess.run([exe, "-f", "-I", lib, "-T", tmp, src], capture_output=True, text=True,
                                timeout=IEC2C_TIMEOUT_S)
         except subprocess.TimeoutExpired as e:
-            raise IecCompError(f"iec2c hung ({IEC2C_TIMEOUT_S} s): {(e.stderr or '')[:600]}") from e
+            err = e.stderr or b""
+            if isinstance(err, bytes):
+                err = err.decode("utf-8", errors="replace")
+            raise IecCompError(f"iec2c hung ({IEC2C_TIMEOUT_S} s): {err.strip()[:600] or '(no stderr)'}") from e
         if r.returncode:
             raise IecCompError(f"iec2c: {name_clash_hint((r.stderr or r.stdout).strip(), text, lib)[:1200]}")
         gen = {f: Path(tmp, f).read_text() for f in ("POUS.c", "POUS.h", "Res.c", "Cfg.h")}
@@ -527,7 +532,8 @@ def main(argv: list[str] | None = None) -> int:
     for f, t in c.files.items():
         Path(a.output, f).write_text(t)
     Path(a.output, f"{c.comp}.hal").write_text("\n".join(c.hal_lines) + "\n")
-    print(f"{a.output}/{c.comp}.comp: halcompile --install -I{a.output} {c.comp}.comp")
+    comp = os.path.join(a.output, f"{c.comp}.comp")
+    print(f"{comp}: halcompile --install {shlex.quote(comp)}")
     return 0
 
 
