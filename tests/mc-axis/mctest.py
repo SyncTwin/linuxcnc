@@ -209,7 +209,7 @@ s("position", 80, "px"); s("velocity", 20, "px")
 pid = edge("execute", "px")
 wait(lambda: g("move-velocity", "px") > 0 or g("error", "px"))
 check(not g("error", "px") and g("busy", "px") and g("failed-id", "px") != pid,
-      "drive-profile ContinuousUpdate: accepted, no error 7")
+      "drive-profile ContinuousUpdate: accepted (px error-id %d)" % g("error-id", "px"))
 edge("execute", "drv")   # the stub drive starts planning once it has a profile velocity
 wait(lambda: g("actual-position", "px") >= 20 or g("error", "px"))
 s("position", 40, "px"); s("velocity", 30, "px")
