@@ -19,7 +19,7 @@ of clipping it, checks the following error, and reports why it stopped.
 
 STATE CODES (pin *state*, PLCopen axis state diagram): 0 Disabled,
 1 Standstill, 2 Homing, 3 DiscreteMotion, 4 ContinuousMotion,
-5 SynchronizedMotion (not produced), 6 Stopping, 7 ErrorStop.
+5 SynchronizedMotion (track mode only), 6 Stopping, 7 ErrorStop.
 
 BUFFER MODE (pin *buffer-mode*): 0 mcAborting (the only one
 implemented), 1 mcBuffered, 2..5 the mcBlending modes.  Anything but 0 is refused
@@ -27,7 +27,8 @@ with error-id 1.
 
 MOVE MODE (pin *mode*): 0 absolute (MC_MoveAbsolute), 1 relative
 (MC_MoveRelative), 2 velocity (MC_MoveVelocity, direction = sign of
-*velocity*).
+*velocity*), 3 track (not PLCopen Part 1: the counterpart of CODESYS
+SoftMotion SMC_TrackSetValues, see TRACK MODE).
 
 MC_SETPOSITION (pin *set-position*): a rising edge in Standstill makes
 *position* the axis's actual position (mode 1: actual + position), no
@@ -36,6 +37,21 @@ motion; Done in the same period.  The shift is an offset of the axis
 frame, so the drive sees no step.  The absolute target, the soft limits and
 actual-position are in the axis frame.  In any other state it is refused
 (error 2).  MC_Home clears the offset; so does reloading the component.
+
+TRACK MODE (*mode* = 3; not part of PLCopen Part 1, modelled on
+SMC_TrackSetValues of the CODESYS SoftMotion library SM3_Basic): the
+execute edge starts a command that follows *position* (absolute) every
+period without a further edge, in state SynchronizedMotion, with
+*velocity*, *acceleration* and *deceleration* re-read every period (the
+continuous-update pin is not needed).  The profile is the one of an
+absolute move re-planned every period: the axis plans to stop at the
+current target, so it lags a moving target by about v^2 / (2 deceleration);
+the target's own velocity is not fed forward.  The command has no Done: it
+stays Busy, and *in-sync* is 1 while the axis stands at the target, until
+another command (halt, stop, a new execute) or power-off aborts it.  A
+target outside the soft limits halts the move with error-id 5, as an
+updated absolute move does; with *limits-enable* = 0 any target is
+followed.  Jerk and drive-profile are refused (error 7 and 8).
 
 ERROR IDS (pin *error-id*): 1 buffer mode not implemented, 2 command
 not allowed in this state, 3 drive fault, 4 following error over ferror-max,
@@ -107,13 +123,46 @@ would be refused at an edge (target outside the soft limits, velocity
 <= 0, jerk on a position move) halts the move with that error-id.  With
 drive-profile = 1 continuous-update is refused (error 7).
 
-FOLLOWING A TARGET (what *simple_tp*(9) does): mode 0, continuous-update
-1, execute held, position wired to the moving target.  The axis plans to
-stop at the target every period, like simple_tp, so it lags a moving target
-by about v^2 / (2 deceleration).  Unlike simple_tp, a target that the axis
-reaches and holds ends the move (Done): a target that moves again after
-that needs a new execute edge (PLCopen 2.4.6).  A target outside the soft
-limits is an error, not clipped (*limit3*(9) clips it).
+FOLLOWING A TARGET WITH PLCOPEN ONLY: mode 0 with continuous-update 1
+follows a moving target too, but a target that the axis reaches and holds
+ends the move (Done), and a target that moves again after that needs a new
+execute edge (PLCopen 2.4.6).  Track mode (3) has no such end.
+
+REPLACING SIMPLE_TP (*simple_tp*(9), the jog planner of motion as a
+component, used by pncconf's axis test): track mode, wired as
+
+----
+loadrt mc_axis names=tp
+loadrt not names=tp-halt
+net tp-en   <enable>      => tp.execute tp-halt.in
+net tp-halt tp-halt.out   => tp.halt
+setp tp.mode 3
+setp tp.power 1
+setp tp.limits-enable 0
+setp tp.stat-op-enabled 1
+setp tp.maxv <ceiling>       (and maxa, ferror-max)
+net tp-fb   tp.pos-cmd    => tp.pos-fb
+----
+
+[options="header"]
+|===
+| simple_tp      | mc_axis
+| target-pos     | position (mode 3, absolute)
+| maxvel         | velocity (capped by maxv)
+| maxaccel       | acceleration (deceleration 0 = the same; capped by maxa)
+| enable 1       | execute rising edge: track from the current position and velocity
+| enable 0       | halt rising edge: decelerate to 0 at the acceleration, no overshoot
+| current-pos    | pos-cmd
+| current-vel    | vel-cmd
+| active         | busy and not in-sync (busy alone stays 1 while tracking a standing target)
+|===
+
+What differs: the position is integrated with the mean velocity of the
+period (simple_tp: the velocity at the end of it); a target outside the soft
+limits is an error unless limits-enable = 0; the planner runs only in
+Standstill or a motion state (power, stat-op-enabled, ferror-max > 0);
+simple_tp's tiny deadband (1e-3 of one period's velocity step times the
+period) is replaced by the stop condition of the profile.
 
 CONTINUOUS AXIS (pin *limits-enable* = 0): a modulo axis without soft
 limits; min-limit/max-limit are not checked, a velocity move runs until
@@ -180,7 +229,7 @@ pin in real velocity "velocity limit of the move; in velocity mode the signed ta
 pin in real acceleration "acceleration of the move (|v| rising), capped by maxa; 0 = maxa (axis default)";
 pin in real deceleration "deceleration of the move (|v| falling), capped by maxa; 0 = acceleration";
 pin in real jerk "jerk limit of the move; 0 = none (trapezoid), > 0 = S-curve (velocity moves only)";
-pin in sint mode "0 absolute, 1 relative, 2 velocity (set-position: 0 absolute, 1 relative)";
+pin in sint mode "0 absolute, 1 relative, 2 velocity, 3 track (not PLCopen; set-position: 0 absolute, 1 relative)";
 pin in bool continuous_update "PLCopen ContinuousUpdate: 1 at the execute edge makes the running move follow position/velocity/acceleration/deceleration/jerk every period while it stays 1";
 pin in sint buffer_mode "index in BUFFER_MODES; only 0 (mcAborting) implemented";
 
@@ -224,6 +273,7 @@ pin out bool done;
 pin out bool active;
 pin out bool command_aborted;
 pin out bool in_velocity "velocity mode reached its target velocity";
+pin out bool in_sync "track mode: the axis stands at the target";
 pin out bool error;
 pin out sint error_id "outcome of the newest command: refusal code, else the ErrorStop reason";
 pin out sint axis_error_id "MC_ReadAxisError: why the axis is in ErrorStop, 0 outside it";
@@ -291,6 +341,8 @@ function _;
 #define E_INVALID_LIMITS_OR_PARAMETERS 7
 #define E_UNKNOWN_MODE 8
 #define E_HOMING_ERROR 9
+
+#define MODE_TRACK 3
 
 #define RUN_NONE 0
 #define RUN_POS  1
@@ -379,7 +431,7 @@ static void end_command(struct __comp_state *__comp_inst, int aborted) {
         if (aborted) aborted_id_set(run_id); else done_id_set(run_id);
         run_id = 0;
     }
-    busy_set(0); active_set(0); in_velocity_set(0);
+    busy_set(0); active_set(0); in_velocity_set(0); in_sync_set(0);
     cu_run = 0;   /* ContinuousUpdate ends with the move (P1 2.4.6) */
 }
 
@@ -412,7 +464,7 @@ static int accept_move(struct __comp_state *__comp_inst, int update) {
     int m = update ? cu_mode : mode;
     if (!update) {
         if (buffer_mode != 0) { cmd_err = E_BUFFER_MODE_NOT_IMPLEMENTED; return 0; }
-        if (m < 0 || m > 2) { cmd_err = E_UNKNOWN_MODE; return 0; }
+        if (m < 0 || m > MODE_TRACK) { cmd_err = E_UNKNOWN_MODE; return 0; }
         /* the drive gets one set-point per move: nothing to update */
         if (drive_profile && continuous_update) { cmd_err = E_INVALID_LIMITS_OR_PARAMETERS; return 0; }
     }
@@ -420,8 +472,9 @@ static int accept_move(struct __comp_state *__comp_inst, int update) {
     if (acceleration < 0.0 || maxa <= 0.0 || deceleration < 0.0 || jerk < 0.0) {
         cmd_err = E_INVALID_LIMITS_OR_PARAMETERS; return 0;
     }
-    /* drive-profile: velocity moves need PV, not implemented yet */
-    if (drive_profile && m == 2) { cmd_err = E_UNKNOWN_MODE; return 0; }
+    /* drive-profile: velocity moves need PV, not implemented yet; the drive
+     * takes one set-point per move, nothing to track */
+    if (drive_profile && (m == 2 || m == MODE_TRACK)) { cmd_err = E_UNKNOWN_MODE; return 0; }
     /* refused, not ignored: the S-curve is a velocity-move ramp; pp has one ramp */
     if (jerk > 0.0 && (m != 2 || drive_profile)) { cmd_err = E_INVALID_LIMITS_OR_PARAMETERS; return 0; }
     if (drive_profile && deceleration > 0.0 && deceleration != acc) {
@@ -444,12 +497,12 @@ static int accept_move(struct __comp_state *__comp_inst, int update) {
         state_set(ST_CONTINUOUS_MOTION);
     } else {
         if (velocity <= 0.0) { cmd_err = E_INVALID_LIMITS_OR_PARAMETERS; return 0; }
-        t = (m == 0) ? position - off : (update ? cu_base : pos_cmd) + position;
+        t = (m == 0 || m == MODE_TRACK) ? position - off : (update ? cu_base : pos_cmd) + position;
         if (limits_enable && (t < lo || t > hi)) { cmd_err = E_SOFT_LIMIT; return 0; }
         tgt = t;
         cmd_vel = velocity < maxv ? velocity : maxv;
         run = RUN_POS;
-        state_set(ST_DISCRETE_MOTION);
+        state_set(m == MODE_TRACK ? ST_SYNCHRONIZED_MOTION : ST_DISCRETE_MOTION);
         if (drive_profile) {
             /* hand the whole move to the drive: target, velocity, acceleration */
             pos_cmd_set(tgt);
@@ -460,7 +513,8 @@ static int accept_move(struct __comp_state *__comp_inst, int update) {
             move_armed = 0;
         }
     }
-    if (!update) { cu_run = continuous_update; cu_mode = m; cu_base = pos_cmd; }
+    /* track mode re-reads its inputs every period by definition */
+    if (!update) { cu_run = continuous_update || m == MODE_TRACK; cu_mode = m; cu_base = pos_cmd; }
     return 1;
 }
 
@@ -575,6 +629,7 @@ FUNCTION(_) {
 
     case ST_DISCRETE_MOTION:
     case ST_CONTINUOUS_MOTION:
+    case ST_SYNCHRONIZED_MOTION:
         if (drive_profile) {
             /* the drive runs the profile; the axis follows its handshake */
             if (stop_edge) {
@@ -629,7 +684,7 @@ FUNCTION(_) {
         if (state == ST_STOPPING) break;
         /* ContinuousUpdate (P1 2.4.6): in force from the execute edge while
          * the input stays 1; the move takes the current inputs every period */
-        if (!continuous_update) cu_run = 0;
+        if (!continuous_update && cu_mode != MODE_TRACK) cu_run = 0;
         if (cu_run && !ex_edge && !accept_move(__comp_inst, 1)) {
             /* the updated move would be refused: the move ends with that Error */
             if (run_id) { failed_id_set(run_id); run_id = 0; }
@@ -643,7 +698,10 @@ FUNCTION(_) {
             double d = tgt - pos_cmd, stopd = v * v / (2.0 * cmd_dec);
             if ((v > 0 && d <= stopd) || (v < 0 && -d <= stopd)) { run = RUN_POS; cmd_jerk = 0.0; }
         }
-        if (profile_step(__comp_inst, dt) || (run == RUN_POS && v == 0.0 && pos_cmd == tgt)) {
+        if (state == ST_SYNCHRONIZED_MOTION && run == RUN_POS) {
+            /* track mode: no Done, in-sync while standing at the target */
+            in_sync_set(profile_step(__comp_inst, dt) || (v == 0.0 && pos_cmd == tgt));
+        } else if (profile_step(__comp_inst, dt) || (run == RUN_POS && v == 0.0 && pos_cmd == tgt)) {
             if (state == ST_CONTINUOUS_MOTION && run == RUN_POS) {
                 to_errorstop(__comp_inst, E_SOFT_LIMIT);
                 v = 0.0; a_cur = 0.0; run = RUN_NONE;
@@ -699,7 +757,7 @@ FUNCTION(_) {
         }
         break;
 
-    default:  /* SynchronizedMotion is not produced; anything else is a bug */
+    default:  /* not a PLCopen state: a bug */
         to_errorstop(__comp_inst, E_COMMAND_NOT_ALLOWED_IN_STATE);
         break;
     }
