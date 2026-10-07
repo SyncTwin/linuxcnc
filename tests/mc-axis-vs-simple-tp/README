@@ -18,3 +18,19 @@ MCTP_MODE=0 runs mc_axis as MC_MoveAbsolute with ContinuousUpdate instead:
 the move ends Done at the first standing target, so it does not follow the
 next one and the test fails.  Every wait is on a HAL state; test.sh bounds
 the whole test.
+
+cmpj.hal / cmpj.py: the same with a jerk limit.  simple_tp.comp has no jerk
+input; the simple_tp that plans with max_jerk is the jog planner of motion,
+src/emc/motion/simple_tp.c (S-curve, planner type 1).  test.sh builds it into
+ref_simple_tp (as tests/blendmath does); mc_axis runs in HAL (track mode, the
+jerk input = maxjerk), sampler records its inputs and outputs, and the inputs
+are replayed period by period through simple_tp.c.  Inputs: steps from rest,
+a reversal while moving, a nearer target while moving, enable 0 mid-move and
+1 again, a target moving at 20 units/s, a step with maxjerk 1000, steps of
+0.001, 0.00001 and 0.000017.  Checked: mc_axis keeps maxvel, maxaccel and maxjerk (from its
+recorded velocity, with the 6-decimal resolution of halsampler); it never
+passes a standing target and comes to rest exactly on it; its position
+differs from simple_tp.c by at most TOL = maxvel * 1.5 periods in every
+period (cmpj.py says where the 1.5 periods come from).  Not compared: maxvel
+lowered during a move, which simple_tp.c obeys in one period (its velocity
+is clipped, not ramped).

@@ -1,0 +1,38 @@
+setexact_for_test_suite_only
+loadrt threads name1=t period1=1000000
+loadrt integ names=ramp
+loadrt sum2 names=tgt
+loadrt not names=halt
+loadrt mc_axis names=mj
+# target en maxvel maxaccel maxjerk mj-pos mj-vel mj-in-position mj-busy phase
+loadrt sampler depth=30000 cfg=fbfffffbbs
+addf ramp t
+addf tgt t
+addf halt t
+addf mj t
+addf sampler.0 t
+
+# the target: a step (signal "step", set by cmpj.py) plus a ramp moving at
+# ramp.in units/s inside the thread
+net step     => tgt.in0
+net rampout  ramp.out => tgt.in1
+net target   tgt.out  => mj.position sampler.0.pin.0
+
+# mc_axis wired as in "REPLACING SIMPLE_TP" of mc_axis(9), plus maxjerk on
+# the jerk input; the inputs are recorded and replayed through simple_tp.c
+net en       => mj.execute halt.in sampler.0.pin.1
+net maxvel   => mj.velocity mj.maxv sampler.0.pin.2
+net maxaccel => mj.acceleration mj.maxa sampler.0.pin.3
+net maxjerk  => mj.jerk sampler.0.pin.4
+net mj-halt  halt.out   => mj.halt
+net mj-pos   mj.pos-cmd => sampler.0.pin.5
+net mj-vel   mj.vel-cmd => sampler.0.pin.6
+net mj-inpos mj.in-position => sampler.0.pin.7
+net mj-busy  mj.busy    => sampler.0.pin.8
+net phase    => sampler.0.pin.9
+setp mj.virtual 1
+setp mj.mode 3
+setp mj.limits-enable 0
+
+start
+loadusr -w ./cmpj.py
