@@ -12,10 +12,9 @@
 ********************************************************************/
 
 #include <fmt/format.h>
-#include "logutil.hh"
 
 #include "nml_intf/emc.hh"
-#include <cstdio>
+#include "libnml/rcs/rcs_print.hh"
 #include "nml_intf/emcglb.h"
 #include "nml_intf/emccfg.h"
 #include <inifile.hh>
@@ -30,7 +29,7 @@ extern value_inihal_data old_inihal_data;
 static void inline print_dbg_config(const std::string &s)
 {
     if (emc_debug & EMC_DEBUG_CONFIG) {
-        log_error("{}: failed\n", s);
+        rcs_print_error("%s", (fmt::format("{}: failed\n", s)).c_str());
     }
 }
 
@@ -211,7 +210,7 @@ static int loadJoint(int joint, const IniFile &ini)
 int iniJoint(int joint, const char *filename)
 {
     if (joint < 0 || joint >= EMCMOT_MAX_JOINTS) {
-        log_error("iniJoint: Invalid joint '{}'", joint);
+        rcs_print_error("iniJoint: Invalid joint '%d'", joint);
         return -1;
     }
 

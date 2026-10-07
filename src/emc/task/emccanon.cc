@@ -48,25 +48,23 @@
   The code from University of Palermo is modified to work on planes xy, yz and zx by Joachim Franek
   */
 
-#include "logutil.hh"
 #include <stdio.h>
 #include <stdarg.h>
 #include <math.h>
 #include <string.h>		// strncpy()
 #include <ctype.h>		// isspace()
+#include "libnml/rcs/rcs_print.hh"
 #include "nml_intf/emc.hh"		// EMC NML
 #include "nml_intf/emc_nml.hh"
 #include <kinematics.h>		// SWITCHKINS_MAX_TYPES
 #include "nml_intf/canon.hh"
 #include "nml_intf/canon_position.hh"		// data type for a machine position
-#include "nml_intf/interpl_nml.hh"		// interp_list
+#include "nml_intf/interpl.hh"		// interp_list
 #include "nml_intf/emcglb.h"		// TRAJ_MAX_VELOCITY
 #include "nml_intf/modal_state.hh"
 #include "tooldata/tooldata.hh"
 #include <axis_kinds.hh>
 #include <algorithm>
-
-using namespace linuxcnc;
 
 //#define EMCCANON_DEBUG
 
@@ -1345,14 +1343,13 @@ void STOP_CUTTER_RADIUS_COMPENSATION()
 
 
 
-void START_SPEED_FEED_SYNCH(int spindle, double feed_per_revolution, bool velocity_mode, double angle_degrees)
+void START_SPEED_FEED_SYNCH(int spindle, double feed_per_revolution, bool velocity_mode)
 {
     flush_segments();
     auto spindleSyncMsg = std::make_unique<EMC_TRAJ_SET_SPINDLESYNC>();
     spindleSyncMsg->spindle = spindle;
     spindleSyncMsg->feed_per_revolution = TO_EXT_LEN(FROM_PROG_LEN(feed_per_revolution));
     spindleSyncMsg->velocity_mode = velocity_mode;
-    spindleSyncMsg->angular_offset_degrees = angle_degrees;
     interp_list.append(std::move(spindleSyncMsg));
     canon.spindle[spindle].synched = 1;
 }
@@ -3484,7 +3481,7 @@ void INIT_CANON()
         std::string err;
         linuxcnc::IniFile ini(emc_inifile);
         if (axisKindsRead(ini, &kinds, &err)) {
-            log_error("{}\n", err);
+            rcs_print_error("%s\n", err.c_str());
         }
     }
 
@@ -3554,7 +3551,7 @@ CANON_TOOL_TABLE GET_EXTERNAL_TOOL_TABLE(int idx)
         tdata.orientation = 0;
     } else {
         if (tooldata_get(&tdata,idx) != IDX_OK) {
-            log_error("UNEXPECTED idx {} {}\n",__FILE__,__LINE__);
+            rcs_print_error("UNEXPECTED idx %s %d\n",__FILE__,__LINE__);
         }
     }
     return tdata;

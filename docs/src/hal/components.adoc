@@ -243,7 +243,6 @@ To search in the man pages, use the UNIX tool `apropos`.
 Limit its slew rate to less than maxv per second. Limit its second derivative to less than MaxA per second squared footnote:[When the input is a position, this means that 'position', 'velocity', and 'acceleration' are limited.]. ||
 | link:../man/man9/lincurve.9.html[lincurve] |One-dimensional lookup table ||
 | link:../man/man9/maj3.9.html[maj3]         |Compute the majority of 3 inputs ||
-| link:../man/man9/mc_axis.9.html[mc_axis] |PLCopen MC Part 1 axis: absolute, relative and velocity moves, halt, stop, reset, home, with soft limits and following-error check. For extra joints and drives outside the trajectory planner. ||
 | link:../man/man9/minmax.9.html[minmax]     |Tracks the minimum and maximum values of the input to the outputs. ||
 | link:../man/man9/mult2.9.html[mult2]       |Product of two inputs. ||
 | link:../man/man9/mux16.9.html[mux16]       |Select from one of 16 input values (multiplexer). ||

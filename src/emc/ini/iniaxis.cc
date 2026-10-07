@@ -14,12 +14,11 @@
 ********************************************************************/
 
 #include <fmt/format.h>
-#include "logutil.hh"
 
 #include "nml_intf/emc.hh"
 #include "nml_intf/emcglb.h"
 #include "nml_intf/emccfg.h"
-#include <cstdio>
+#include "libnml/rcs/rcs_print.hh"
 #include <inifile.hh>
 
 #include "inihal.hh"
@@ -36,7 +35,7 @@ double ext_offset_a_or_v_ratio[EMCMOT_MAX_AXIS]; // all zero
 static void inline print_dbg_config(const std::string &s)
 {
     if (emc_debug & EMC_DEBUG_CONFIG) {
-        log_error("{}: failed\n", s);
+        rcs_print_error("%s", (fmt::format("{}: failed\n", s)).c_str());
     }
 }
 
@@ -56,7 +55,7 @@ static void inline print_dbg_config(const std::string &s)
 static int loadAxis(int axis, const IniFile &ini)
 {
     if(axis < 0 || axis > 8) {
-        log_error("Invalid axis index '{}' outside range [0,8]\n", axis);
+        rcs_print_error("Invalid axis index '%d' outside range [0,8]\n", axis);
         return -1;
     }
 
@@ -82,8 +81,8 @@ static int loadAxis(int axis, const IniFile &ini)
 #define MAX_AV_RATIO     0.9
     double ratio = ini.findRealV("OFFSET_AV_RATIO", axisSection, DEFAULT_A_OR_V_RATIO);
     if (ratio < 0.0 || ratio > MAX_AV_RATIO) {
-        log_error("Invalid: [{}]OFFSET_AV_RATIO={:8.5f} (range [0.0,{}]); using: [{}]OFFSET_AV_RATIO={:8.5f}\n",
-               axisSection.c_str(), ratio, MAX_AV_RATIO, axisSection.c_str(), REPLACE_AV_RATIO);
+        rcs_print_error("Invalid: [%s]OFFSET_AV_RATIO=%8.5f (range [0.0,%f]); using: [%s]OFFSET_AV_RATIO=%8.5f\n",
+                        axisSection.c_str(), ratio, MAX_AV_RATIO, axisSection.c_str(), REPLACE_AV_RATIO);
         ratio = REPLACE_AV_RATIO;
     }
     ext_offset_a_or_v_ratio[axis] = ratio;

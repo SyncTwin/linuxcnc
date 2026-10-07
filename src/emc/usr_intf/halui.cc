@@ -16,7 +16,6 @@
 * Last change:
 ********************************************************************/
 
-#include "logutil.hh"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -27,22 +26,22 @@
 
 #include <hal.h>		/* access to HAL functions/definitions */
 #include <rtapi.h>		/* rtapi_print_msg */
-#include "rcs_status.hh"
+#include "libnml/rcs/rcs.hh"
 #include <posemath.h>		// PM_POSE, TO_RAD
 #include "nml_intf/emc.hh"		// EMC NML
 #include "nml_intf/emc_nml.hh"
 #include "nml_intf/emcglb.h"		// EMC_NMLFILE, TRAJ_MAX_VELOCITY, etc.
 #include "nml_intf/emccfg.h"		// DEFAULT_TRAJ_MAX_VELOCITY
 #include <inifile.hh>
+#include "libnml/rcs/rcs_print.hh"
 #include "libnml/nml/nml_oi.hh"
-#include "timeutil.hh"
+#include "libnml/os_intf/timer.hh"
 #include <rtapi_string.h>
 #include "tooldata/tooldata.hh"
 #include "mapini.hh"
 #include "unitenum.hh"
 
 using namespace linuxcnc;
-using namespace std::chrono_literals;
 
 /* Using halui: see the man page */
 
@@ -323,10 +322,10 @@ static int emcErrorNmlGet()
 
 static int tryNml()
 {
-    std::chrono::seconds end;
+    double end;
     int good;
-constexpr auto RETRY_TIME = 10s;     // wait for subsystems to come up
-constexpr auto RETRY_INTERVAL = 1s;  // between wait tries for a subsystem
+#define RETRY_TIME 10.0		// seconds to wait for subsystems to come up
+#define RETRY_INTERVAL 1.0	// seconds between wait tries for a subsystem
 
     end = RETRY_TIME;
     good = 0;
@@ -337,7 +336,7 @@ constexpr auto RETRY_INTERVAL = 1s;  // between wait tries for a subsystem
         }
         esleep(RETRY_INTERVAL);
         end -= RETRY_INTERVAL;
-    } while (end > 0s);
+    } while (end > 0.0);
 
     if (!good) {
         return -1;
@@ -352,7 +351,7 @@ constexpr auto RETRY_INTERVAL = 1s;  // between wait tries for a subsystem
         }
         esleep(RETRY_INTERVAL);
         end -= RETRY_INTERVAL;
-    } while (end > 0s);
+    } while (end > 0.0);
 
     if (!good) {
         return -1;
@@ -360,6 +359,8 @@ constexpr auto RETRY_INTERVAL = 1s;  // between wait tries for a subsystem
 
     return 0;
 
+#undef RETRY_TIME
+#undef RETRY_INTERVAL
 }
 
 static int updateStatus()
@@ -397,12 +398,12 @@ static int updateStatus()
 }
 
 
-constexpr auto EMC_COMMAND_DELAY = 100ms;  // how long to sleep between checks
+#define EMC_COMMAND_DELAY   0.1	// how long to sleep between checks
 
 static int emcCommandWaitDone()
 {
-    for (auto end = 0ms; end < std::chrono::duration<double>(doneTimeout);
-	 end += EMC_COMMAND_DELAY) {
+    double end;
+    for (end = 0.0; end < doneTimeout; end += EMC_COMMAND_DELAY) {
 	updateStatus();
 	int serial_diff = emcStatus->echo_serial_number - emcCommandSerialNumber;
 
@@ -438,8 +439,8 @@ static int emcCommandSend(RCS_CMD_MSG & cmd)
     emcCommandSerialNumber = cmd.serial_number;
 
     // wait for receive
-    for (auto end = 0ms; end < std::chrono::duration<double>(receiveTimeout);
-	 end += EMC_COMMAND_DELAY) {
+    double end;
+    for (end = 0.0; end < receiveTimeout; end += EMC_COMMAND_DELAY) {
 	updateStatus();
 	int serial_diff = emcStatus->echo_serial_number - emcCommandSerialNumber;
 
@@ -1218,14 +1219,39 @@ static int iniLoad(const char *filename)
     // EMC debugging flags
     emc_debug = (unsigned)inifile.findUIntV("DEBUG", "EMC", 0);
 
+    // set output for RCS messages
+    if (auto inival = mapRcsDestination(inifile, "RCS_DEBUG_DEST", "EMC")) {
+        set_rcs_print_destination(*inival);
+    } else {
+        set_rcs_print_destination(RCS_PRINT_TO_STDOUT);
+    }
+
+    // NML/RCS debugging flags
+    set_rcs_print_flag(PRINT_RCS_ERRORS);  // only print errors by default
+    // enable all debug messages by default if RCS or NML debugging is enabled
+    if ((emc_debug & EMC_DEBUG_RCS) || (emc_debug & EMC_DEBUG_NML)) {
+        // output all RCS debug messages
+        set_rcs_print_flag(PRINT_EVERYTHING);
+    }
+
+    // set flags if RCS_DEBUG in ini file
+    if (auto inival = inifile.findUInt("RCS_DEBUG", "EMC")) {
+        // clear all flags
+        clear_rcs_print_flag(PRINT_EVERYTHING);
+        // set parsed flags
+        set_rcs_print_flag((long)*inival);
+    }
+    // output infinite RCS errors by default
+    max_rcs_errors_to_print = inifile.findIntV("RCS_MAX_ERR", "EMC", -1);
+
     if (emc_debug & EMC_DEBUG_CONFIG) {
         std::string version = inifile.findStringV("VERSION", "EMC", "<unknown>");
         std::string machine = inifile.findStringV("MACHINE", "EMC", "<unknown>");
         extern char *program_invocation_short_name;
-        log_info(
-            "{} ({}) halui: machine '{}'  version '{}'\n",
-            program_invocation_short_name, getpid(), machine, version
-            );
+        rcs_print(
+            "%s (%d) halui: machine '%s'  version '%s'\n",
+            program_invocation_short_name, getpid(), machine.c_str(), version.c_str()
+        );
     }
 
     if (auto inistring = inifile.findString("NML_FILE", "EMC")) {
@@ -1268,7 +1294,7 @@ static int iniLoad(const char *filename)
         }
     }
     if (num_axes ==0) {
-        log_info("halui: no [TRAJ]COORDINATES specified, enabling all axes\n");
+        rcs_print("halui: no [TRAJ]COORDINATES specified, enabling all axes\n");
         num_axes = EMCMOT_MAX_AXIS;
         axis_mask = (1 << EMCMOT_MAX_AXIS) - 1;
     }
@@ -1938,9 +1964,9 @@ static void modify_hal_pins()
 		if (halui_sent_mdi) { // we have an ongoing MDI command
 			if (mdi_finished) { //which seems to have finished
 			halui_sent_mdi = 0;
-			esleep(20ms); //sleep for a while
+			esleep(0.02); //sleep for a while
 			updateStatus();
-			esleep(20ms); //sleep for a while
+			esleep(0.02); //sleep for a while
 			}
 		}
 		hal_set_bool(halui_data->halui_mdi_is_running, halui_sent_mdi);
@@ -2084,19 +2110,19 @@ int main(int argc, char *argv[])
 {
     // process command line args
     if (0 != emcGetArgs(argc, argv)) {
-	log_error("error in argument list\n");
+	rcs_print_error("error in argument list\n");
 	exit(1);
     }
 
     // get configuration information
     if (0 != iniLoad(emc_inifile)) {
-	log_error("iniLoad error\n");
+	rcs_print_error("iniLoad error\n");
 	exit(2);
     }
 
     //init HAL and export pins
     if (0 != halui_hal_init()) {
-	log_error("hal_init error\n");
+	rcs_print_error("hal_init error\n");
 	exit(1);
     }
 
@@ -2105,7 +2131,7 @@ int main(int argc, char *argv[])
 
     // init NML
     if (0 != tryNml()) {
-	log_error("can't connect to emc\n");
+	rcs_print_error("can't connect to emc\n");
 	thisQuit();
 	exit(1);
     }
@@ -2139,7 +2165,7 @@ int main(int argc, char *argv[])
         }
         check_hal_changes(); //if anything changed send NML messages
         modify_hal_pins(); //if status changed modify HAL too
-        esleep(20ms); //sleep for a while
+        esleep(0.02); //sleep for a while
         updateStatus();
     }
     thisQuit();

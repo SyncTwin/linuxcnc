@@ -423,11 +423,6 @@ int hm2_sserial_create_params(hostmot2_t *hm2, hm2_sserial_remote_t *chan){
     int hal_dir;
 
     chan->params = hal_malloc(chan->num_globals * sizeof(*chan->params));
-    if (chan->params == NULL && chan->num_globals > 0) {
-        HM2_ERR("out of HAL memory allocating %i sserial params on %s\n",
-                chan->num_globals, chan->name);
-        return -ENOMEM;
-    }
     for (i = 0 ; i < chan->num_globals ; i++){
         global = chan->globals[i];
 
@@ -524,7 +519,7 @@ int hm2_sserial_get_globals_list(hostmot2_t *hm2, hm2_sserial_remote_t *chan){
                 return -EINVAL;
             }
             // process is a subset of global. The only way to tell is to compare
-            for (i = 0; i < chan->num_confs ; i ++) {
+            for (i = 0; i <= chan->num_confs ; i ++) {
                 if (chan->confs[i].ParmAddr == data.ParmAddr){i = 1000;}
             }
             if (data.RecordType == LBP_DATA && i < 1000) {
@@ -1104,11 +1099,6 @@ int hm2_sserial_create_pins(hostmot2_t *hm2, hm2_sserial_remote_t *chan){
     int r = 0;
     int data_dir;
     chan->pins = hal_malloc(chan->num_confs * sizeof(*chan->pins));
-    if (chan->pins == NULL && chan->num_confs > 0) {
-        HM2_ERR("out of HAL memory allocating %i sserial pin sets on %s\n",
-                chan->num_confs, chan->name);
-        return -ENOMEM;
-    }
 
     chan->num_read_bits = 0 ; chan->num_write_bits = 0;
 
@@ -1163,12 +1153,6 @@ int hm2_sserial_create_pins(hostmot2_t *hm2, hm2_sserial_remote_t *chan){
                 chan->pins[i].bit_pins = hal_malloc(chan->confs[i].DataLength * sizeof(*chan->pins[i].bit_pins));
                 chan->pins[i].bit_pins_not = hal_malloc(chan->confs[i].DataLength * sizeof(*chan->pins[i].bit_pins_not));
                 chan->pins[i].invert = hal_malloc(chan->confs[i].DataLength * sizeof(*chan->pins[i].invert));
-                if ((chan->pins[i].bit_pins == NULL || chan->pins[i].bit_pins_not == NULL
-                     || chan->pins[i].invert == NULL) && chan->confs[i].DataLength > 0) {
-                    HM2_ERR("out of HAL memory allocating %i bit pins on %s.%s\n",
-                            chan->confs[i].DataLength, chan->name, chan->confs[i].NameString);
-                    return -ENOMEM;
-                }
                 for (j = 0; j < chan->confs[i].DataLength ; j++){
 
                     r = hal_pin_new_bool(hm2->llio->comp_id, data_dir, &(chan->pins[i].bit_pins[j]),
@@ -1254,11 +1238,6 @@ int hm2_sserial_create_pins(hostmot2_t *hm2, hm2_sserial_remote_t *chan){
                 }
                 if (data_dir == HAL_IN) {
                     chan->pins[i].invert = hal_malloc(sizeof(*chan->pins[i].invert));
-                    if (chan->pins[i].invert == NULL) {
-                        HM2_ERR("out of HAL memory allocating invert param on %s.%s\n",
-                                chan->name, chan->confs[i].NameString);
-                        return -ENOMEM;
-                    }
                     r = hal_param_new_bool(hm2->llio->comp_id, HAL_RW, chan->pins[i].invert,
                                            0, "%s.%s-invert", chan->name, chan->confs[i].NameString);
                     if (r < 0) {
@@ -1886,25 +1865,6 @@ int hm2_sserial_read_pins(hm2_sserial_remote_t *chan){
                 }
                 if ( ! (h_flag && l_flag)){
                     break;
-                }
-                if (conf->DataType == LBP_ENCODER_L) {
-                    // LBP_ENCODER_L entries have no pins; the encoder body
-                    // below must run on the matching LBP_ENCODER_H entry's
-                    // pin set regardless of which entry completes the pair.
-                    int e;
-                    for (e = 0; e < chan->num_confs; e++){
-                        if (chan->confs[e].DataType == LBP_ENCODER_H){
-                            pin = &chan->pins[e];
-                            break;
-                        }
-                    }
-                    if (e == chan->num_confs){
-                        HM2_ERR_NO_LL("sserial read: LBP_ENCODER_L with no matching LBP_ENCODER_H (name: ""%s"")\n",
-                                      conf->NameString);
-                        h_flag = 0; l_flag = 0;
-                        buff_store = 0;
-                        break;
-                    }
                 }
                 buff = buff_store;
                 /* Fallthrough */

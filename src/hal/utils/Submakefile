@@ -105,7 +105,7 @@ endif
 	$(ECHO) Copying python script $(notdir $@)
 	$(Q)(echo '#!$(PYTHON)'; sed '1 { /^#!/d; }' $<) > $@.tmp && chmod +x $@.tmp && mv -f $@.tmp $@
 
-../bin/elbpcom ../bin/iec2comp: ../bin/%: hal/utils/%.py
+../bin/elbpcom: ../bin/%: hal/utils/%.py
 	@$(ECHO) Syntax checking python script $(notdir $@)
 	$(Q)$(PYTHON) -m py_compile $<
 	$(ECHO) Copying python script $(notdir $@)
@@ -117,7 +117,7 @@ endif
 	$(ECHO) Copying python script $(notdir $@)
 	$(Q)(echo '#!$(PYTHON)'; sed '1 { /^#!/d; }' $<) > $@.tmp && chmod +x $@.tmp && mv -f $@.tmp $@
 
-TARGETS += ../bin/halcompile ../bin/elbpcom ../bin/iec2comp ../bin/mesambccc
+TARGETS += ../bin/halcompile ../bin/elbpcom ../bin/mesambccc
 objects/%.py: %.g
 	@mkdir -p $(dir $@)
 	$(Q)$(YAPPS) $< $@

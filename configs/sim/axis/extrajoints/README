@@ -16,8 +16,3 @@ extrajoints demos
    16 joints total
    12 extra joints (joint.4-15)
    simulated home switches
-
-mc_axis
-   5 joints total
-   1 extra joint (joint.4) driven by
-   the mc_axis PLCopen axis component

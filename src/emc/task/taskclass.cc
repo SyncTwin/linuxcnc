@@ -13,15 +13,15 @@
 * Last change:
 ********************************************************************/
 
-#include "logutil.hh"
 #include <math.h>		// fabs()
 #include <float.h>		// DBL_MAX
 #include <string.h>		// memcpy() strncpy()
 #include <stdlib.h>		// malloc()
 #include <sys/wait.h>
 
-#include "rcs_status.hh"		// enum class RCS_STATUS
-
+#include "libnml/rcs/rcs.hh"		// RCS_CMD_CHANNEL, etc.
+#include "libnml/rcs/rcs_print.hh"
+#include "libnml/os_intf/timer.hh"             // esleep, etc.
 #include "nml_intf/emcglb.h"		// EMC_INIFILE
 
 #include "pythonplugin/python_plugin.hh"
@@ -112,6 +112,7 @@ int emcCoolantFloodOn() { return task_methods->emcCoolantFloodOn(); }
 int emcCoolantFloodOff() { return task_methods->emcCoolantFloodOff(); }
 int emcToolPrepare(int tool) { return task_methods->emcToolPrepare(tool); }
 int emcToolLoad() { return task_methods->emcToolLoad(); }
+int emcToolUnload()  { return task_methods->emcToolUnload(); }
 int emcToolLoadToolTable(const char *file) { return task_methods->emcToolLoadToolTable(file); }
 int emcToolSetOffset(int pocket, int toolno, const EmcPose& offset, double diameter,
                      double frontangle, double backangle, int orientation) {
@@ -131,6 +132,7 @@ int emcTaskOnce(const char * /*filename*/, EMC_IO_STAT &emcioStatus)
     }
     return 0;
 }
+
 
 extern "C" PyObject* PyInit_interpreter(void);
 extern "C" PyObject* PyInit_emccanon(void);
@@ -194,7 +196,7 @@ Task::Task(EMC_IO_STAT & emcioStatus_in) :
     tooldata_init(random_toolchanger);
     if (db_mode == tooldb_t::DB_ACTIVE) {
         if (0 != tooldata_db_init(db_program, random_toolchanger)) {
-            log_error("can't initialize DB_PROGRAM.\n");
+            rcs_print_error("can't initialize DB_PROGRAM.\n");
             db_mode = tooldb_t::DB_NOTUSED;
             tooldata_set_db(db_mode);
         }
@@ -213,7 +215,7 @@ Task::Task(EMC_IO_STAT & emcioStatus_in) :
     }
 
     if (0 != tooldata_load(tooltable_filename)) {
-        log_error("can't load tool table.\n");
+        rcs_print_error("can't load tool table.\n");
     }
 
     if (random_toolchanger) {
@@ -226,6 +228,7 @@ Task::Task(EMC_IO_STAT & emcioStatus_in) :
         emcioStatus.tool.toolInSpindle = 0;
     }    
 };
+
 
 Task::~Task() {};
 
@@ -277,7 +280,7 @@ static int readToolChange(const IniFile &toolInifile)
 	    retval = 0;
 	} else {
 	    /* bad format */
-	    log_info("bad format for TOOL_CHANGE_POSITION\n");
+	    rcs_print("bad format for TOOL_CHANGE_POSITION\n");
 	    have_tool_change_position = 0;
 	    retval = -1;
 	}
@@ -533,6 +536,12 @@ int Task::emcToolLoad()//EMC_TOOL_LOAD_TYPE
             // loopback machine)
             emcioStatus.status = RCS_STATUS::EXEC;
     }
+    return 0;
+}
+
+int Task::emcToolUnload()//EMC_TOOL_UNLOAD_TYPE
+{
+    emcioStatus.tool.toolInSpindle = 0;
     return 0;
 }
 

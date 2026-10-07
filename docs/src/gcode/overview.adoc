@@ -116,8 +116,7 @@ The table includes N and O for completeness, even though, as defined above, line
 |A | A axis of machine
 |B | B axis of machine
 |C | C axis of machine
-.2+|D | Tool radius compensation number.
-<| Start angle offset from the spindle index pulse, in degrees, for G33 and G76 threading.
+|D | Tool radius compensation number
 |F | Feed rate
 |G | General function (See table  <<cap:modal-groups,G-code Modal Groups>>)
 |H | Tool length offset index
