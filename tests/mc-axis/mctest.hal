@@ -1,9 +1,21 @@
 loadrt threads name1=t period1=1000000
-loadrt mc_axis names=ax,fx
+loadrt mc_axis names=ax,fx,px,drv
 loadrt integ names=ramp
+loadrt oneshot names=ack
+loadrt weighted_sum wsum_sizes=1
+loadrt conv_sint_uint names=sw
+loadrt not names=nack
+loadrt and2 names=pdone
 addf ax t
 addf ramp t
 addf fx t
+addf px t
+addf drv t
+addf ack t
+addf process_wsums t
+addf sw t
+addf nack t
+addf pdone t
 
 # an ideal drive: the feedback follows the command, the drive is
 # operation-enabled while the axis enables it
@@ -29,6 +41,39 @@ setp fx.maxv 50
 setp fx.maxa 200
 setp fx.ferror-max 1
 setp fx.velocity 50
+
+# px: drive-profile = 1 (CiA-402 Profile Position) on a stub of cia402 pp-mode
+# and the drive.  The drive's own profile is drv, a virtual axis in track
+# mode: it follows the set-point px.pos-cmd with px.move-velocity and
+# px.move-acceleration, so a new set-point replaces the running one at once
+# (controlword bit 5).  Statusword bit 12 (set-point acknowledge) is 1 for
+# ack.width after each move-execute pulse; drv-move-done is, as cia402
+# pp-done, target reached (drv.in-position) and acknowledge 0.
+net pcmd  px.pos-cmd => drv.position
+net pfb   drv.pos-cmd => px.pos-fb
+net pen   px.enable-out => px.stat-op-enabled
+net pvel  px.move-velocity => drv.velocity
+net pacc  px.move-acceleration => drv.acceleration
+net pexe  px.move-execute => ack.in
+net pack  ack.out => wsum.0.bit.0.in nack.in
+net psws  wsum.0.sum => sw.in
+net psw   sw.out => px.drv-statusword
+net pnack nack.out => pdone.in1
+net pinp  drv.in-position => pdone.in0
+net pdn   pdone.out => px.drv-move-done
+setp ack.width 0.05
+setp wsum.0.bit.0.weight 4096
+setp px.drive-profile 1
+setp px.min-limit -1
+setp px.max-limit 110
+setp px.maxv 50
+setp px.maxa 200
+setp px.ferror-max 1
+setp drv.virtual 1
+setp drv.mode 3
+setp drv.limits-enable 0
+setp drv.maxv 1000
+setp drv.maxa 10000
 
 start
 loadusr -w ./mctest.py
