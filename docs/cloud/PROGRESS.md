@@ -60,7 +60,7 @@
 | pp-velocity → 0x6081 | :153, :647 | нет |
 | pp-accel → 0x6083/0x6084 | :154, :648–649 | нет |
 | pp-halt → cw bit 8 | :152, :667 | нет |
-| opmode 1 (PP) | :644, param pp-mode :183 | нет |
+| opmode 1 (PP) | :643, param pp-mode :183 | нет |
 
 ## Шаг 2b — PP + ContinuousUpdate в mc_axis (готово)
 - Коммиты: 2d363f8d (mc_axis), f978f0bd (tests).
