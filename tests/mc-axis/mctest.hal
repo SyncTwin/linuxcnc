@@ -1,6 +1,9 @@
 loadrt threads name1=t period1=1000000
-loadrt mc_axis names=ax
+loadrt mc_axis names=ax,fx
+loadrt integ names=ramp
 addf ax t
+addf ramp t
+addf fx t
 
 # an ideal drive: the feedback follows the command, the drive is
 # operation-enabled while the axis enables it
@@ -14,6 +17,18 @@ setp ax.maxa 200
 setp ax.ferror-max 1
 setp ax.velocity 50
 setp ax.acceleration 200
+
+# fx follows a target that moves inside the thread: ramp.out rises at
+# ramp.in units/s (ContinuousUpdate, the simple_tp use)
+net fcmd fx.pos-cmd => fx.pos-fb
+net fen  fx.enable-out => fx.stat-op-enabled
+net tgt  ramp.out => fx.position
+setp fx.min-limit -1
+setp fx.max-limit 110
+setp fx.maxv 50
+setp fx.maxa 200
+setp fx.ferror-max 1
+setp fx.velocity 50
 
 start
 loadusr -w ./mctest.py
