@@ -45,8 +45,9 @@ period without a further edge, in state SynchronizedMotion, with
 *velocity*, *acceleration* and *deceleration* re-read every period (the
 continuous-update pin is not needed).  The profile is the one of an
 absolute move re-planned every period: the axis plans to stop at the
-current target, so it lags a moving target by about v^2 / (2 deceleration);
-the target's own velocity is not fed forward.  Unlike SMC_TrackSetValues
+current target, so it lags a moving target by about v^2 / (2 deceleration)
+(with a jerk, v^2 / (2 deceleration) + v deceleration / (2 jerk) once the
+acceleration reaches its cap); the target's own velocity is not fed forward.  Unlike SMC_TrackSetValues
 there are no set-velocity and set-acceleration inputs: as in simple_tp the
 target is a position only, and *in-position* (1 while the profile stands at
 the target) is not the bInSync of CODESYS, which also holds while moving.
@@ -54,7 +55,8 @@ The command has no Done: it stays Busy until
 another command (halt, stop, a new execute) or power-off aborts it.  A
 target outside the soft limits halts the move with error-id 5, as an
 updated absolute move does; with *limits-enable* = 0 any target is
-followed.  Jerk and drive-profile are refused (error 7 and 8).
+followed.  *jerk* > 0 makes the output a jerk-limited S-curve (see
+ACCELERATION, DECELERATION, JERK).  drive-profile is refused (error 8).
 
 ERROR IDS (pin *error-id*): 1 buffer mode not implemented, 2 command
 not allowed in this state, 3 drive fault, 4 following error over ferror-max,
@@ -98,19 +100,31 @@ DRIVE PROFILE (pin *drive-profile* = 1): for a drive without cyclic
 position mode (CiA-402 Profile Position).  An accepted absolute/relative
 move is handed over whole: pos-cmd = target, move-velocity,
 move-acceleration, one period of move-execute; done comes from
-drv-move-done (seen 0 after the set-point, then 1).  Halt/stop and ErrorStop
-raise move-halt.  No own profile, no following-error check (the drive
-checks it).  Velocity moves are refused (error 8).  With drive-profile = 0
-(default) none of this runs.
+drv-move-done (seen 0 after the newest set-point, then 1).  Halt/stop and
+ErrorStop raise move-halt.  No own profile, no following-error check (the
+drive checks it).  Velocity moves and track mode are refused (error 8),
+so are a jerk and a deceleration different from acceleration (error 7):
+cia402 has no jerk input and writes one value to 0x6083 and 0x6084.  With
+continuous-update see CONTINUOUSUPDATE.  With drive-profile = 0 (default)
+none of this runs.
 
 ACCELERATION, DECELERATION, JERK (inputs of MC_Move*): *acceleration*
 raises |v| (0 = the axis default maxa), *deceleration* lowers it
 (0 = same as acceleration), both capped by maxa.  *jerk* = 0 is no
 jerk limit (trapezoid); jerk > 0 is a jerk-limited S-curve, implemented for
-velocity moves (MC_MoveVelocity and MC_Halt of such a move).  A position
-move with jerk > 0 is refused (error 7), not ignored; so is drive-profile
-with a jerk or a deceleration different from acceleration.  MC_Stop and
-ErrorStop brake at maxa without a jerk limit.
+velocity moves (MC_MoveVelocity and MC_Halt of such a move) and track mode.
+The velocity ramps with the rounding law a^2 = 2 jerk dv of nextAccel() in
+motion's simple_tp.c (the jog planner with max_jerk), the acceleration capped
+as above.  In track mode the axis ramps toward the velocity as long as the
+S-curve stop after the period still ends at or before the target, else at
+the fastest rate whose stop still does: a target that stands is never
+passed, also when it changes during the move; one moved closer than the
+stop is passed by what the full stop needs, then approached from there.
+The stop is computed period by period, so the cost of a period grows with
+deceleration / (jerk * period).  An absolute or relative move with jerk > 0
+is refused (error 7), not ignored; so is drive-profile with a jerk or a
+deceleration different from acceleration.  MC_Stop and ErrorStop brake at
+maxa without a jerk limit.
 
 CONTINUOUSUPDATE (pin *continuous-update*, PLCopen Part 1 v2.0, 2.4.6):
 taken with the rising edge of execute.  When it is 1 at that edge, the
@@ -123,8 +137,18 @@ buffer-mode are kept from the edge.  The update ends for good when
 continuous-update falls or the move ends; once a position move is Done it
 takes no more values until the next execute edge.  An updated value that
 would be refused at an edge (target outside the soft limits, velocity
-<= 0, jerk on a position move) halts the move with that error-id.  With
-drive-profile = 1 continuous-update is refused (error 7).
+<= 0, jerk on an absolute or relative move) halts the move with that
+error-id.  With drive-profile = 1 a changed position, velocity or
+acceleration is a new set-point (pos-cmd, move-velocity, move-acceleration,
+one period of move-execute); cia402 raises it with controlword bit 5
+(change set immediately), so the drive replaces the running one.  It is
+handed over only once the drive has acknowledged the previous set-point:
+bit 12 of drv-statusword rose and fell again (cia402 keeps bit 4 high
+until the acknowledge, and a set-point raised meanwhile gives the drive no
+new edge).  Until then the newest values wait; if the drive reaches the
+previous set-point first, the waiting one is handed over from there and
+there is no Done before it.  Without drv-statusword wired an update waits
+for each reached set-point.  Done comes once, at the last target.
 
 FOLLOWING A TARGET WITH PLCOPEN ONLY: mode 0 with continuous-update 1
 follows a moving target too, but a target that the axis reaches and holds
@@ -166,6 +190,7 @@ net tp-acc  <maxaccel>   => tp.acceleration tp.maxa
 | target-pos     | position (mode 3, absolute)
 | maxvel         | velocity and maxv (one signal)
 | maxaccel       | acceleration and maxa (one signal; deceleration 0 = the same)
+| max_jerk (simple_tp.c of motion; simple_tp.comp has none) | jerk
 | enable 1       | execute rising edge: track from the current position and velocity
 | enable 0       | halt rising edge: decelerate to 0 at the acceleration, no overshoot
 | current-pos    | pos-cmd
@@ -244,7 +269,7 @@ pin in real position "target (absolute) or distance (relative), machine units";
 pin in real velocity "velocity limit of the move; in velocity mode the signed target velocity";
 pin in real acceleration "acceleration of the move (|v| rising), capped by maxa; 0 = maxa (axis default)";
 pin in real deceleration "deceleration of the move (|v| falling), capped by maxa; 0 = acceleration";
-pin in real jerk "jerk limit of the move; 0 = none (trapezoid), > 0 = S-curve (velocity moves only)";
+pin in real jerk "jerk limit of the move; 0 = none (trapezoid), > 0 = S-curve (velocity moves and track mode)";
 pin in sint mode "0 absolute, 1 relative, 2 velocity, 3 track (not PLCopen; set-position: 0 absolute, 1 relative)";
 pin in bool continuous_update "PLCopen ContinuousUpdate: 1 at the execute edge makes the running move follow position/velocity/acceleration/deceleration/jerk every period while it stays 1";
 pin in sint buffer_mode "index in BUFFER_MODES; only 0 (mcAborting) implemented";
@@ -264,7 +289,7 @@ pin in bool stat_homed "cia402.N.stat-homed";
 pin in real pos_fb "cia402.N.pos-fb";
 pin in sint drv_torque "drive actual torque 0x6077 (per mille of rated), raw from the bus";
 pin in real drv_velocity "cia402.N.velocity-fb (machine units/s)";
-pin in uint drv_statusword "drive statusword 0x6041, raw from the bus";
+pin in uint drv_statusword "drive statusword 0x6041, raw from the bus (bit 13 homing error; drive-profile: bit 12 set-point acknowledge)";
 pin in uint drive_error "drive error code 0x603F as read, 0 = no fault (passed through for the caller, not interpreted)";
 
 // ---- to the drive (e.g. cia402)
