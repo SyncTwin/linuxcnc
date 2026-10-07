@@ -396,7 +396,9 @@ static void ramps_max(struct __comp_state *__comp_inst) {
  * reached at rate J. */
 static void scurve_step(struct __comp_state *__comp_inst, double vreq, double dt) {
     double rem = vreq - v, dj = cmd_jerk * dt, alim, areq;
-    if (fabs(rem) <= 0.5 * dj * dt && fabs(a_cur) <= dj) { v = vreq; a_cur = 0.0; return; }
+    /* the last step lands on vreq: its acceleration is rem / dt, within one
+     * jerk step of the last one, and the next period takes it to 0 */
+    if (fabs(rem) <= dj * dt && fabs(rem / dt - a_cur) <= dj) { v = vreq; a_cur = rem / dt; return; }
     alim = (v == 0.0 || (v > 0.0) == (rem > 0.0)) ? cmd_acc : cmd_dec;
     areq = -dj + sqrt(2.0 * cmd_jerk * fabs(rem) + dj * dj);
     if (areq > alim) areq = alim;
