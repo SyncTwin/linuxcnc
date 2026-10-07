@@ -327,12 +327,12 @@ static void scurve_step(struct __comp_state *__comp_inst, double vreq, double dt
 }
 
 /* One period of the profile.  Position move: the velocity that still stops
- * exactly at the target with deceleration cmd_dec (v^2 = 2 d s, corrected by one
- * period of discretisation), capped by vcap; |v| rises at cmd_acc and falls at
- * cmd_dec (trapezoid).  Velocity move / stop: ramp to vcap (signed) or 0, an
- * S-curve when cmd_jerk > 0.  Returns 1 when the move is finished. */
+ * exactly at the target with deceleration cmd_dec, capped by vcap; |v| rises
+ * at cmd_acc and falls at cmd_dec (trapezoid).  Velocity move / stop: ramp to
+ * vcap (signed) or 0, an S-curve when cmd_jerk > 0.  Returns 1 when the move
+ * is finished. */
 static int profile_step(struct __comp_state *__comp_inst, double dt) {
-    double dd = cmd_dec * dt, vreq, vold = v, d, r;
+    double dd = cmd_dec * dt, vreq, vold = v, d, r, q;
     int fin = 0;
     if (run == RUN_POS) {
         d = tgt - pos_cmd;
@@ -340,7 +340,13 @@ static int profile_step(struct __comp_state *__comp_inst, double dt) {
             pos_cmd_set(tgt); v = 0.0; a_cur = 0.0;
             return 1;
         }
-        vreq = -dd + sqrt(2.0 * cmd_dec * fabs(d) + dd * dd);
+        /* The position integrates the mean velocity of the period, so this
+         * period covers (vold + v) / 2 * dt and the stop after it v^2 / (2 dec):
+         * v^2 + dd v + dd vold - 2 dec |d| <= 0, vold signed toward the target.
+         * (-dd + sqrt(2 dec |d| + dd^2), the law of simple_tp, is exact for
+         * position += v * dt and passes the target by up to dd * dt / 2 here.) */
+        q = 0.25 * dd * dd - dd * (d < 0 ? -vold : vold) + 2.0 * cmd_dec * fabs(d);
+        vreq = -0.5 * dd + (q > 0.0 ? sqrt(q) : 0.0);
         /* a velocity move that turned into the stop at its soft limit keeps its
          * signed cmd_vel: cap by the magnitude, the sign comes from d below */
         if (vreq > fabs(cmd_vel)) vreq = fabs(cmd_vel);
