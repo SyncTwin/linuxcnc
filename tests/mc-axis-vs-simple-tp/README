@@ -1,0 +1,20 @@
+simple_tp and mc_axis side by side: both in one thread, one target (a step
+plus a ramp moving inside the thread), one enable, one maxvel/maxaccel.
+mc_axis runs in track mode (mode 3), wired as in "REPLACING SIMPLE_TP" of
+mc_axis(9); sampler records every period of both planners.
+
+Inputs: steps from rest, a reversal while moving, enable 0 in the middle of a
+move and again at rest, maxvel lowered and maxvel/maxaccel raised during a
+move, a target moving at 20 units/s, and the same target moving again after
+the planners reached it.
+
+Checked on the record: neither planner exceeds maxvel (except while ramping
+down to a lowered maxvel) or maxaccel; neither passes a standing target;
+wherever simple_tp comes to rest at a standing target, mc_axis is at rest
+there too, at most 2 periods later (the two planners discretise the same
+stopping law differently at the start and at the end of a move).
+
+MCTP_MODE=0 runs mc_axis as MC_MoveAbsolute with ContinuousUpdate instead:
+the move ends Done at the first standing target, so it does not follow the
+next one and the test fails.  Every wait is on a HAL state; test.sh bounds
+the whole test.

@@ -1,0 +1,45 @@
+setexact_for_test_suite_only
+loadrt threads name1=t period1=1000000
+loadrt integ names=ramp
+loadrt sum2 names=tgt
+loadrt not names=halt
+loadrt simple_tp
+loadrt mc_axis names=mt
+# target stp-pos stp-vel mt-pos mt-vel maxvel maxaccel en stp-active mt-in-sync mt-busy phase
+loadrt sampler depth=20000 cfg=fffffffbbbbs
+addf ramp t
+addf tgt t
+addf halt t
+addf simple-tp.0.update t
+addf mt t
+addf sampler.0 t
+
+# one target for both planners: a step (signal "step", set by cmp.py)
+# plus a ramp moving at ramp.in units/s inside the thread
+net step     => tgt.in0
+net rampout  ramp.out => tgt.in1
+net target   tgt.out  => simple-tp.0.target-pos mt.position sampler.0.pin.0
+
+# simple_tp
+net en       => simple-tp.0.enable mt.execute halt.in sampler.0.pin.7
+net maxvel   => simple-tp.0.maxvel mt.velocity sampler.0.pin.5
+net maxaccel => simple-tp.0.maxaccel mt.acceleration sampler.0.pin.6
+net stp-pos  simple-tp.0.current-pos => sampler.0.pin.1
+net stp-vel  simple-tp.0.current-vel => sampler.0.pin.2
+net stp-act  simple-tp.0.active      => sampler.0.pin.8
+
+# mc_axis wired as in "REPLACING SIMPLE_TP" of mc_axis(9)
+net mt-halt  halt.out   => mt.halt
+net mt-pos   mt.pos-cmd => mt.pos-fb sampler.0.pin.3
+net mt-vel   mt.vel-cmd => sampler.0.pin.4
+net mt-sync  mt.in-sync => sampler.0.pin.9
+net mt-busy  mt.busy    => sampler.0.pin.10
+net phase    => sampler.0.pin.11
+setp mt.stat-op-enabled 1
+setp mt.limits-enable 0
+setp mt.maxv 1000
+setp mt.maxa 100000
+setp mt.ferror-max 1
+
+start
+loadusr -w ./cmp.py
