@@ -136,9 +136,8 @@ objects): an axis without a drive.  The feedback is the command
 MC_Power alone makes it operation-enabled, it never faults and MC_Home ends
 at once where it stands.  pos-fb, stat-op-enabled, drv-fault, stat-homed,
 drv-torque, drv-velocity are ignored; enable-out and fault-reset-out stay 0;
-ferror-max is not needed.  maxv and maxa left at 0 are no ceiling (the
-command's velocity and acceleration govern); soft limits left at
-min-limit = max-limit are not checked.  drive-profile = 1 is refused
+ferror-max is not needed; maxv, maxa and the soft limits are checked as on
+a real axis.  drive-profile = 1 is refused
 (error 7): there is no drive to hand the move to.
 
 REPLACING SIMPLE_TP (*simple_tp*(9), the jog planner of motion as a
@@ -150,17 +149,20 @@ loadrt not names=tp-halt
 setp tp.virtual 1
 setp tp.mode 3
 setp tp.power 1
-net tp-en   <enable>   => tp.execute tp-halt.in
-net tp-halt tp-halt.out => tp.halt
-net tp-tgt  <target-pos> => tp.position     (maxvel => tp.velocity, maxaccel => tp.acceleration)
+setp tp.limits-enable 0
+net tp-tgt  <target-pos> => tp.position
+net tp-en   <enable>     => tp.execute tp-halt.in
+net tp-halt tp-halt.out  => tp.halt
+net tp-vel  <maxvel>     => tp.velocity tp.maxv
+net tp-acc  <maxaccel>   => tp.acceleration tp.maxa
 ----
 
 [options="header"]
 |===
 | simple_tp      | mc_axis
 | target-pos     | position (mode 3, absolute)
-| maxvel         | velocity (capped by maxv when set)
-| maxaccel       | acceleration (deceleration 0 = the same; capped by maxa when set)
+| maxvel         | velocity and maxv (one signal)
+| maxaccel       | acceleration and maxa (one signal; deceleration 0 = the same)
 | enable 1       | execute rising edge: track from the current position and velocity
 | enable 0       | halt rising edge: decelerate to 0 at the acceleration, no overshoot
 | current-pos    | pos-cmd
@@ -170,8 +172,8 @@ net tp-tgt  <target-pos> => tp.position     (maxvel => tp.velocity, maxaccel => 
 
 What differs: the position is integrated with the mean velocity of the
 period (simple_tp: the velocity at the end of it); a target outside the soft
-limits is an error when soft limits are set; the planner runs only while
-powered (power; a virtual axis needs nothing else);
+limits is an error unless limits-enable = 0; the planner runs only while
+powered (a virtual axis needs nothing else) with maxv, maxa > 0;
 simple_tp's tiny deadband (1e-3 of one period's velocity step times the
 period) is replaced by the stop condition of the profile.
 
@@ -362,26 +364,22 @@ function _;
 #define RUN_STOP 3
 
 /* The drive as the axis sees it.  A virtual axis has none: its feedback is
- * its own command, it is operation-enabled while powered, never faults, and a
- * ceiling or soft-limit pair left at 0 is not set. */
+ * its own command, it is operation-enabled while powered and never faults. */
 #define FB_POS   (virtual ? pos_cmd : pos_fb)
 #define OP_EN    (virtual ? power : stat_op_enabled)
 #define FAULT    (virtual ? 0 : drv_fault)
-#define VMAX     (virtual && maxv <= 0.0 ? 1e300 : maxv)
-#define AMAX     (virtual && maxa <= 0.0 ? 1e300 : maxa)
-#define LIMITS   (limits_enable && !(virtual && max_limit == min_limit))
 
 static int limits_ok(struct __comp_state *__comp_inst) {
-    if (virtual)   /* no drive: no following error, no drive profile; ceilings optional */
-        return !drive_profile && maxv >= 0.0 && maxa >= 0.0
-            && (!LIMITS || max_limit > min_limit);
+    if (virtual)   /* no drive: no following error, no drive profile */
+        return !drive_profile && maxv > 0.0 && maxa > 0.0
+            && (!limits_enable || max_limit > min_limit);
     return maxv > 0.0 && maxa > 0.0 && ferror_max > 0.0
         && (!limits_enable || max_limit > min_limit);
 }
 
 /* Set the ramps of a stop at the axis ceiling: trapezoid, no jerk limit. */
 static void ramps_max(struct __comp_state *__comp_inst) {
-    cmd_acc = cmd_dec = AMAX > 0.0 ? AMAX : 1e9;  /* no valid ceiling: stop at once */
+    cmd_acc = cmd_dec = maxa > 0.0 ? maxa : 1e9;  /* no valid ceiling: stop at once */
     cmd_jerk = 0.0;
 }
 
@@ -493,8 +491,8 @@ static int accept_move(struct __comp_state *__comp_inst, int update) {
         /* the drive gets one set-point per move: nothing to update */
         if (drive_profile && continuous_update) { cmd_err = E_INVALID_LIMITS_OR_PARAMETERS; return 0; }
     }
-    double acc = acceleration > 0.0 && acceleration < AMAX ? acceleration : AMAX;   /* 0 = axis default */
-    if (acceleration < 0.0 || AMAX <= 0.0 || deceleration < 0.0 || jerk < 0.0) {
+    double acc = acceleration > 0.0 && acceleration < maxa ? acceleration : maxa;   /* 0 = axis default */
+    if (acceleration < 0.0 || maxa <= 0.0 || deceleration < 0.0 || jerk < 0.0) {
         cmd_err = E_INVALID_LIMITS_OR_PARAMETERS; return 0;
     }
     /* drive-profile: velocity moves need PV, not implemented yet; the drive
@@ -506,13 +504,13 @@ static int accept_move(struct __comp_state *__comp_inst, int update) {
         cmd_err = E_INVALID_LIMITS_OR_PARAMETERS; return 0;
     }
     cmd_acc = acc;
-    cmd_dec = deceleration > 0.0 ? (deceleration < AMAX ? deceleration : AMAX) : cmd_acc;
+    cmd_dec = deceleration > 0.0 ? (deceleration < maxa ? deceleration : maxa) : cmd_acc;
     cmd_jerk = jerk;
     if (m == 2) {
         t = velocity;
-        if (t > VMAX) t = VMAX;
-        if (t < -VMAX) t = -VMAX;
-        if (LIMITS && ((t > 0.0 && pos_cmd >= hi) || (t < 0.0 && pos_cmd <= lo))) {
+        if (t > maxv) t = maxv;
+        if (t < -maxv) t = -maxv;
+        if (limits_enable && ((t > 0.0 && pos_cmd >= hi) || (t < 0.0 && pos_cmd <= lo))) {
             cmd_err = E_SOFT_LIMIT; return 0;
         }
         cmd_vel = t;
@@ -523,9 +521,9 @@ static int accept_move(struct __comp_state *__comp_inst, int update) {
     } else {
         if (velocity <= 0.0) { cmd_err = E_INVALID_LIMITS_OR_PARAMETERS; return 0; }
         t = (m == 0 || m == MODE_TRACK) ? position - off : (update ? cu_base : pos_cmd) + position;
-        if (LIMITS && (t < lo || t > hi)) { cmd_err = E_SOFT_LIMIT; return 0; }
+        if (limits_enable && (t < lo || t > hi)) { cmd_err = E_SOFT_LIMIT; return 0; }
         tgt = t;
-        cmd_vel = velocity < VMAX ? velocity : VMAX;
+        cmd_vel = velocity < maxv ? velocity : maxv;
         run = RUN_POS;
         state_set(m == MODE_TRACK ? ST_SYNCHRONIZED_MOTION : ST_DISCRETE_MOTION);
         if (drive_profile) {
@@ -723,7 +721,7 @@ FUNCTION(_) {
             term_shown = 0;
             run = RUN_STOP; state_set(ST_DISCRETE_MOTION);
         }
-        if (run == RUN_VEL && LIMITS) {
+        if (run == RUN_VEL && limits_enable) {
             /* a velocity move plans toward the soft limit it heads to; arriving
              * there is a soft-limit error, the profile has already stopped */
             double d = tgt - pos_cmd, stopd = v * v / (2.0 * cmd_dec);
