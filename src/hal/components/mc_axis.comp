@@ -46,8 +46,11 @@ period without a further edge, in state SynchronizedMotion, with
 continuous-update pin is not needed).  The profile is the one of an
 absolute move re-planned every period: the axis plans to stop at the
 current target, so it lags a moving target by about v^2 / (2 deceleration);
-the target's own velocity is not fed forward.  The command has no Done: it
-stays Busy, and *in-sync* is 1 while the axis stands at the target, until
+the target's own velocity is not fed forward.  Unlike SMC_TrackSetValues
+there are no set-velocity and set-acceleration inputs: as in simple_tp the
+target is a position only, and *in-position* (1 while the profile stands at
+the target) is not the bInSync of CODESYS, which also holds while moving.
+The command has no Done: it stays Busy until
 another command (halt, stop, a new execute) or power-off aborts it.  A
 target outside the soft limits halts the move with error-id 5, as an
 updated absolute move does; with *limits-enable* = 0 any target is
@@ -167,7 +170,7 @@ net tp-acc  <maxaccel>   => tp.acceleration tp.maxa
 | enable 0       | halt rising edge: decelerate to 0 at the acceleration, no overshoot
 | current-pos    | pos-cmd
 | current-vel    | vel-cmd
-| active         | busy and not in-sync (busy alone stays 1 while tracking a standing target)
+| active         | busy and not in-position (busy alone stays 1 while tracking a standing target)
 |===
 
 What differs: the position is integrated with the mean velocity of the
@@ -287,7 +290,7 @@ pin out bool done;
 pin out bool active;
 pin out bool command_aborted;
 pin out bool in_velocity "velocity mode reached its target velocity";
-pin out bool in_sync "track mode: the axis stands at the target";
+pin out bool in_position "track mode: the axis stands at the target";
 pin out bool error;
 pin out sint error_id "outcome of the newest command: refusal code, else the ErrorStop reason";
 pin out sint axis_error_id "MC_ReadAxisError: why the axis is in ErrorStop, 0 outside it";
@@ -454,7 +457,7 @@ static void end_command(struct __comp_state *__comp_inst, int aborted) {
         if (aborted) aborted_id_set(run_id); else done_id_set(run_id);
         run_id = 0;
     }
-    busy_set(0); active_set(0); in_velocity_set(0); in_sync_set(0);
+    busy_set(0); active_set(0); in_velocity_set(0); in_position_set(0);
     cu_run = 0;   /* ContinuousUpdate ends with the move (P1 2.4.6) */
 }
 
@@ -728,8 +731,8 @@ FUNCTION(_) {
             if ((v > 0 && d <= stopd) || (v < 0 && -d <= stopd)) { run = RUN_POS; cmd_jerk = 0.0; }
         }
         if (state == ST_SYNCHRONIZED_MOTION && run == RUN_POS) {
-            /* track mode: no Done, in-sync while standing at the target */
-            in_sync_set(profile_step(__comp_inst, dt) || (v == 0.0 && pos_cmd == tgt));
+            /* track mode: no Done, in-position while standing at the target */
+            in_position_set(profile_step(__comp_inst, dt) || (v == 0.0 && pos_cmd == tgt));
         } else if (profile_step(__comp_inst, dt) || (run == RUN_POS && v == 0.0 && pos_cmd == tgt)) {
             if (state == ST_CONTINUOUS_MOTION && run == RUN_POS) {
                 to_errorstop(__comp_inst, E_SOFT_LIMIT);
