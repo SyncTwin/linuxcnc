@@ -102,6 +102,13 @@ or a motion state; ErrorStop is left only through reset; Stopping holds
 while stop is 1.  The following-error check is always on while powered; a
 non-positive ferror-max keeps the axis Disabled (error 7) instead of
 disabling the check.
+
+AXIS READINGS (MC_ReadActualPosition, MC_ReadActualTorque,
+MC_ReadActualVelocity): a caller reads them at the axis, never at the bus:
+*actual-position* (pos-fb plus the MC_SetPosition offset), *torque-fb* (per
+mille of rated torque, as the drive reports object 0x6077), *velocity-fb*
+(machine units/s) and *statusword* (object 0x6041 as is).  They are fed by
+the raw inputs drv-torque, drv-velocity and drv-statusword.
 """;
 
 notes
@@ -126,6 +133,9 @@ net ax-flt   cia402.N.drv-fault        => mc-axis.N.drv-fault
 net ax-frst  mc-axis.N.fault-reset-out => cia402.N.fault-reset
 net ax-homd  cia402.N.stat-homed       => mc-axis.N.stat-homed
 net ax-home  mc-axis.N.drive-home     <=> cia402.N.home
+net ax-vel   cia402.N.velocity-fb      => mc-axis.N.drv-velocity
+net ax-trq   <0x6077 PDO pin>          => mc-axis.N.drv-torque
+net ax-sw    <0x6041 PDO pin>          => mc-axis.N.drv-statusword
 ----
 
 The target (position, mode, velocity) must be computed no later than the
