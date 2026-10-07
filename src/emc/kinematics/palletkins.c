@@ -42,6 +42,8 @@ static struct geom *g;
 
 int kinematicsForward(const double *joint, EmcPose *pos,
         const KINEMATICS_FORWARD_FLAGS *fflags, KINEMATICS_INVERSE_FLAGS *iflags) {
+    (void)fflags;
+    (void)iflags;
     double q1 = joint[0] * D2R, q2 = joint[1] * D2R, q3 = joint[2] * D2R;
     double sx = GEOM_GET(g->sx), sz = GEOM_GET(g->sz), u = GEOM_GET(g->u), f = GEOM_GET(g->f);
     double fx = GEOM_GET(g->fx), fy = GEOM_GET(g->fy), fz = GEOM_GET(g->fz);
@@ -58,6 +60,8 @@ int kinematicsForward(const double *joint, EmcPose *pos,
 
 int kinematicsInverse(const EmcPose *pos, double *joint,
         const KINEMATICS_INVERSE_FLAGS *iflags, KINEMATICS_FORWARD_FLAGS *fflags) {
+    (void)iflags;
+    (void)fflags;
     double x = pos->tran.x, y = pos->tran.y, fy = GEOM_GET(g->fy);
     double U = GEOM_GET(g->u), F = GEOM_GET(g->f);
     double rho2 = x * x + y * y;
