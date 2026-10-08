@@ -1,0 +1,107 @@
+matiec: 9c75953
+POUS.c
+POUS.h
+LOCATED_VARIABLES.h
+GLOBALS.h
+config.c
+config.h
+res.c
+iec2c exit=0
+In file included from /home/user/linuxcnc/docs/cloud/sfc/harness.c:16:
+/home/user/matiec/lib/C/iec_std_lib.h: In function '__string_to_time':
+/home/user/matiec/lib/C/iec_std_lib.h:681:41: warning: pointer targets in passing argument 1 of '__iec_lib_atof' differ in signedness [-Wpointer-sign]
+  681 |         LREAL IN_val = __iec_lib_atof(IN.body, IN.len);
+      |                                       ~~^~~~~
+      |                                         |
+      |                                         uint8_t * {aka unsigned char *}
+/home/user/matiec/lib/C/iec_std_lib.h:547:42: note: expected 'char *' but argument is of type 'uint8_t *' {aka 'unsigned char *'}
+  547 | static inline LREAL __iec_lib_atof(char *str, __strlen_t l) {
+      |                                    ~~~~~~^~~
+In file included from config.c:6:
+/home/user/matiec/lib/C/iec_std_lib.h: In function '__string_to_time':
+/home/user/matiec/lib/C/iec_std_lib.h:681:41: warning: pointer targets in passing argument 1 of '__iec_lib_atof' differ in signedness [-Wpointer-sign]
+  681 |         LREAL IN_val = __iec_lib_atof(IN.body, IN.len);
+      |                                       ~~^~~~~
+      |                                         |
+      |                                         uint8_t * {aka unsigned char *}
+/home/user/matiec/lib/C/iec_std_lib.h:547:42: note: expected 'char *' but argument is of type 'uint8_t *' {aka 'unsigned char *'}
+  547 | static inline LREAL __iec_lib_atof(char *str, __strlen_t l) {
+      |                                    ~~~~~~^~~
+In file included from res.c:6:
+/home/user/matiec/lib/C/iec_std_lib.h: In function '__string_to_time':
+/home/user/matiec/lib/C/iec_std_lib.h:681:41: warning: pointer targets in passing argument 1 of '__iec_lib_atof' differ in signedness [-Wpointer-sign]
+  681 |         LREAL IN_val = __iec_lib_atof(IN.body, IN.len);
+      |                                       ~~^~~~~
+      |                                         |
+      |                                         uint8_t * {aka unsigned char *}
+/home/user/matiec/lib/C/iec_std_lib.h:547:42: note: expected 'char *' but argument is of type 'uint8_t *' {aka 'unsigned char *'}
+  547 | static inline LREAL __iec_lib_atof(char *str, __strlen_t l) {
+      |                                    ~~~~~~^~~
+gcc exit=0
+== 9c75953 k=1 s4=2 m=3
+scan go nxt back | S0 S1 S4 S2 S3 | dP dP1 dP0 dN dS dN3
+   0  0   0    0 |  1  0  0  0  0 |  0  0  0  0  0  0
+   1  1   0    0 |  0  1  0  0  1 |  1  1  0  1  1  1
+   2  0   1    0 |  0  0  1  0  1 |  0  0  1  1  1  1
+   3  0   0    0 |  0  0  1  0  1 |  0  0  0  0  1  1
+   4  0   1    0 |  0  0  0  1  1 |  0  0  0  0  1  1
+   5  0   0    0 |  0  0  0  1  1 |  0  0  0  0  0  1
+   6  0   0    0 |  0  0  0  1  1 |  0  0  0  0  0  1
+   7  0   0    1 |  1  0  0  0  0 |  0  0  0  0  0  1
+   8  0   0    0 |  1  0  0  0  0 |  0  0  0  0  0  0
+   9  0   0    0 |  1  0  0  0  0 |  0  0  0  0  0  0
+  10  0   0    0 |  1  0  0  0  0 |  0  0  0  0  0  0
+ROW|9c75953|P|S1 active 1 scan|total per activation|1|1|PASS
+ROW|9c75953|P|S1 active 1 scan|in entry scan|1|1|PASS
+ROW|9c75953|P1|S1 active 1 scan|total per activation (entry edge)|1|1|PASS
+ROW|9c75953|P1|S1 active 1 scan|in entry scan|1|1|PASS
+ROW|9c75953|P0|S1 active 1 scan|total per deactivation (exit edge)|1|1|PASS
+ROW|9c75953|P0|S1 active 1 scan|in exit scan|1|1|PASS
+ROW|9c75953|P0|S1 active 1 scan|in scan after exit|0|0|PASS
+ROW|9c75953|P1|S1 active 1 scan|in scan after exit|0|0|PASS
+ROW|9c75953|N|S1 active 1 scan|runs with S1.X=TRUE|1|1|PASS
+ROW|9c75953|N|S1 active 1 scan|total (k + final scan)|2|2|PASS
+ROW|9c75953|S|S1 active 1 scan|runs with S1.X=TRUE|1|1|PASS
+ROW|9c75953|S|S1 active 1 scan|runs with S4.X=TRUE (latched after S1)|2|2|PASS
+ROW|9c75953|S|S1 active 1 scan|runs with S2.X=TRUE (R active; final scan only)|1|1|PASS
+ROW|9c75953|S|S1 active 1 scan|total|4|4|PASS
+ROW|9c75953|R vs N (other step)|S1 active 1 scan|A_N3 runs while S2 (R) active|-|3|FACT
+ROW|9c75953|R vs N (other step)|S1 active 1 scan|A_N3 runs with S3.X=TRUE|-|6|FACT
+ROW|9c75953|R vs N (other step)|S1 active 1 scan|A_N3 total|-|7|FACT
+== 9c75953 k=4 s4=2 m=3
+scan go nxt back | S0 S1 S4 S2 S3 | dP dP1 dP0 dN dS dN3
+   0  0   0    0 |  1  0  0  0  0 |  0  0  0  0  0  0
+   1  1   0    0 |  0  1  0  0  1 |  1  1  0  1  1  1
+   2  0   0    0 |  0  1  0  0  1 |  0  0  0  1  1  1
+   3  0   0    0 |  0  1  0  0  1 |  0  0  0  1  1  1
+   4  0   0    0 |  0  1  0  0  1 |  0  0  0  1  1  1
+   5  0   1    0 |  0  0  1  0  1 |  0  0  1  1  1  1
+   6  0   0    0 |  0  0  1  0  1 |  0  0  0  0  1  1
+   7  0   1    0 |  0  0  0  1  1 |  0  0  0  0  1  1
+   8  0   0    0 |  0  0  0  1  1 |  0  0  0  0  0  1
+   9  0   0    0 |  0  0  0  1  1 |  0  0  0  0  0  1
+  10  0   0    1 |  1  0  0  0  0 |  0  0  0  0  0  1
+  11  0   0    0 |  1  0  0  0  0 |  0  0  0  0  0  0
+  12  0   0    0 |  1  0  0  0  0 |  0  0  0  0  0  0
+  13  0   0    0 |  1  0  0  0  0 |  0  0  0  0  0  0
+ROW|9c75953|P|S1 active 4 scans|total per activation|1|1|PASS
+ROW|9c75953|P|S1 active 4 scans|in entry scan|1|1|PASS
+ROW|9c75953|P1|S1 active 4 scans|total per activation (entry edge)|1|1|PASS
+ROW|9c75953|P1|S1 active 4 scans|in entry scan|1|1|PASS
+ROW|9c75953|P0|S1 active 4 scans|total per deactivation (exit edge)|1|1|PASS
+ROW|9c75953|P0|S1 active 4 scans|in exit scan|1|1|PASS
+ROW|9c75953|P0|S1 active 4 scans|in scan after exit|0|0|PASS
+ROW|9c75953|P1|S1 active 4 scans|in scan after exit|0|0|PASS
+ROW|9c75953|P|S1 active 4 scans|in 2nd active scan|0|0|PASS
+ROW|9c75953|P1|S1 active 4 scans|in 2nd active scan|0|0|PASS
+ROW|9c75953|N|S1 active 4 scans|runs with S1.X=TRUE|4|4|PASS
+ROW|9c75953|N|S1 active 4 scans|total (k + final scan)|5|5|PASS
+ROW|9c75953|S|S1 active 4 scans|runs with S1.X=TRUE|4|4|PASS
+ROW|9c75953|S|S1 active 4 scans|runs with S4.X=TRUE (latched after S1)|2|2|PASS
+ROW|9c75953|S|S1 active 4 scans|runs with S2.X=TRUE (R active; final scan only)|1|1|PASS
+ROW|9c75953|S|S1 active 4 scans|total|7|7|PASS
+ROW|9c75953|R vs N (other step)|S1 active 4 scans|A_N3 runs while S2 (R) active|-|3|FACT
+ROW|9c75953|R vs N (other step)|S1 active 4 scans|A_N3 runs with S3.X=TRUE|-|9|FACT
+ROW|9c75953|R vs N (other step)|S1 active 4 scans|A_N3 total|-|10|FACT
+FAILURES 0
+harness exit=0

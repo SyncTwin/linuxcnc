@@ -1,0 +1,54 @@
+Running test: tests/mc-axis
++ set -e
++ timeout -k 5 120 halrun -f mctest.hal
+Note: realtime scheduling unavailable (sched_setscheduler SCHED_FIFO: Operation not permitted).
+  Process capabilities: cap_sys_nice=no cap_ipc_lock=no.
+  Falling back to POSIX non-realtime.
+  Fix: 'sudo make setcap' (preferred) or 'sudo make setuid' on rtapi_app.
+  Override (testing only): set LINUXCNC_FORCE_REALTIME=1.
+Note: Using POSIX non-realtime
+No isolated CPU's found, expect some latency or set RTAPI_CPU_NUMBER to select CPU
+ok: unpowered axis is Disabled
+ok: MC_Power: Standstill
+ok: MoveAbsolute 100: Done
+ok: MoveAbsolute 100: at 100
+ok: MoveAbsolute 100: velocity within maxv
+ok: MoveAbsolute 100: Standstill
+ok: Done reset after execute fell
+ok: Halt: the move is CommandAborted
+ok: Halt: Done
+ok: Halt: Standstill
+ok: Halt: stopped short of the target
+ok: target outside limits: error-id 5
+ok: refused move: no motion
+ok: refusal Error reset after execute fell
+ok: SetPosition 10: no motion
+ok: MoveRelative +5: at 15
+ok: MoveVelocity -20: InVelocity
+ok: MoveVelocity halted
+ok: ContinuousUpdate: relative move ends at the updated distance
+ok: ContinuousUpdate: the updated velocity is taken
+ok: ContinuousUpdate: same command, not aborted
+ok: ContinuousUpdate: no new values after Done
+ok: ContinuousUpdate 0 at the edge: change ignored
+ok: ContinuousUpdate falling: the move keeps its target
+ok: ContinuousUpdate outside limits: error-id 5
+ok: ContinuousUpdate outside limits: halted
+ok: follow: one command follows the moving target
+ok: follow: at the target's velocity
+ok: follow: lags the target by about v^2/2a (1.000)
+ok: follow: Done at the target where it stopped
+ok: follow: after Done a moving target needs a new Execute edge
+ok: drive-profile ContinuousUpdate: accepted (px error-id 0)
+ok: drive-profile ContinuousUpdate: new set-point handed over while the drive moves
+ok: drive-profile ContinuousUpdate: no set-point before the previous one is acknowledged
+ok: drive-profile ContinuousUpdate: the held update is handed over after the acknowledge
+ok: drive-profile ContinuousUpdate: Done at the updated target, the old one (80) not approached
+ok: drive-profile ContinuousUpdate: the updated velocity is taken
+ok: drive-profile ContinuousUpdate: same command, not aborted
+ok: drive-profile ContinuousUpdate: Done once, the axis stands
+ok: drive fault: ErrorStop, error-id 3
+ok: move refused in ErrorStop
+ok: MC_Reset: Standstill
+ok: power off: Disabled
+Runtest: 1 tests run, 1 successful, 0 failed, 0 skipped, 0 shmem errors

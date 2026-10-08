@@ -1,0 +1,24 @@
+Note: realtime scheduling unavailable (sched_setscheduler SCHED_FIFO: Operation not permitted).
+  Process capabilities: cap_sys_nice=no cap_ipc_lock=no.
+  Falling back to POSIX non-realtime.
+  Fix: 'sudo make setcap' (preferred) or 'sudo make setuid' on rtapi_app.
+  Override (testing only): set LINUXCNC_FORCE_REALTIME=1.
+Note: Using POSIX non-realtime
+No isolated CPU's found, expect some latency or set RTAPI_CPU_NUMBER to select CPU
+Component Pins:
+Owner   Type  Dir                 Value  Name
+    10  bool  IN                   TRUE  iec-blink.0.enable
+    10  bool  IN                   TRUE  iec-blink.0.permit
+    10  bool  OUT                 FALSE  iec-blink.0.qx-0-0
+    10  bool  IN                  FALSE  iec-blink.0.qx-0-0-safe
+    10  sint  OUT                     0  iec-blink.0.time
+
+Component Pins:
+Owner   Type  Dir                 Value  Name
+    10  bool  IN                   TRUE  iec-blink.0.enable
+    10  bool  IN                   TRUE  iec-blink.0.permit
+    10  bool  OUT                  TRUE  iec-blink.0.qx-0-0
+    10  bool  IN                  FALSE  iec-blink.0.qx-0-0-safe
+    10  sint  OUT                   481  iec-blink.0.time
+
+halrun=0

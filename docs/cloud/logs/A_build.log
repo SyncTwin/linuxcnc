@@ -1,0 +1,300 @@
+Compiling realtime objects/hal/components/not.c
+Compiling realtime objects/hal/components/offset.c
+Compiling realtime objects/hal/components/ohmic.c
+Compiling realtime objects/hal/components/oneshot.c
+Compiling realtime objects/hal/components/or2.c
+Compiling realtime objects/hal/components/orient.c
+Compiling realtime objects/hal/components/output_buffer.c
+Compiling realtime objects/hal/components/plasmac.c
+Compiling realtime objects/hal/components/pushmsg.c
+Compiling realtime objects/hal/components/radiobutton.c
+Compiling realtime objects/hal/components/raster.c
+Compiling realtime objects/hal/components/reset.c
+Compiling realtime objects/hal/components/safety_latch.c
+Compiling realtime objects/hal/components/sample_hold.c
+Compiling realtime objects/hal/components/scale.c
+Compiling realtime objects/hal/components/scaled_sint_sums.c
+Compiling realtime objects/hal/components/select8.c
+Compiling realtime objects/hal/components/sim_axis_hardware.c
+Compiling realtime objects/hal/components/sim_home_switch.c
+Compiling realtime objects/hal/components/sim_matrix_kb.c
+Compiling realtime objects/hal/components/sim_parport.c
+Compiling realtime objects/hal/components/sim_spindle.c
+Compiling realtime objects/hal/components/simple_tp.c
+Compiling realtime objects/hal/components/sphereprobe.c
+Compiling realtime objects/hal/components/spindle.c
+Compiling realtime objects/hal/components/spindle_monitor.c
+Compiling realtime objects/hal/components/steptest.c
+Compiling realtime objects/hal/components/sum2.c
+Compiling realtime objects/hal/components/tap.c
+Compiling realtime objects/hal/components/thc.c
+Compiling realtime objects/hal/components/thcud.c
+Compiling realtime objects/hal/components/threadtest.c
+Compiling realtime objects/hal/components/time.c
+Compiling realtime objects/hal/components/timedelay.c
+Compiling realtime objects/hal/components/timedelta.c
+Compiling realtime objects/hal/components/tof.c
+Compiling realtime objects/hal/components/toggle.c
+Compiling realtime objects/hal/components/toggle2nist.c
+Compiling realtime objects/hal/components/ton.c
+Compiling realtime objects/hal/components/tp.c
+Compiling realtime objects/hal/components/tristate_bit.c
+Compiling realtime objects/hal/components/tristate_float.c
+Compiling realtime objects/hal/components/updown.c
+Compiling realtime objects/hal/components/userkins.c
+Compiling realtime objects/hal/components/wcomp.c
+Compiling realtime objects/hal/components/xhc_hb04_util.c
+Compiling realtime objects/hal/components/xor2.c
+Compiling realtime objects/hal/components/xyzab_tdr_kins.c
+Compiling realtime objects/hal/components/xyzacb_trsrn.c
+Compiling realtime objects/hal/components/xyzbca_trsrn.c
+Compiling realtime objects/hal/drivers/serport.c
+Compiling realtime objects/hal/drivers/mesa_7i65.c
+Compiling realtime objects/hal/drivers/mesa_uart.c
+Linking ../rtlib/boss_plc.so
+Linking ../rtlib/debounce.so
+Linking ../rtlib/demux_generic.so
+Linking ../rtlib/encoder.so
+Linking ../rtlib/enum.so
+Linking ../rtlib/counter.so
+Linking ../rtlib/encoder_ratio.so
+Linking ../rtlib/stepgen.so
+Linking ../rtlib/lcd.so
+Linking ../rtlib/matrix_kb.so
+Linking ../rtlib/mux_generic.so
+Linking ../rtlib/pwmgen.so
+Linking ../rtlib/siggen.so
+Linking ../rtlib/pid.so
+Linking ../rtlib/threads.so
+Linking ../rtlib/supply.so
+Linking ../rtlib/sim_encoder.so
+Linking ../rtlib/weighted_sum.so
+Linking ../rtlib/watchdog.so
+Linking ../rtlib/modmath.so
+Linking ../rtlib/streamer.so
+Linking ../rtlib/sampler.so
+Linking ../rtlib/hal_parport.so
+Linking ../rtlib/hal_speaker.so
+Linking ../rtlib/hal_gm.so
+Linking ../rtlib/hal_ppmc.so
+Linking ../rtlib/hal_bb_gpio.so
+Linking ../rtlib/hal_pi_gpio.so
+Linking ../rtlib/hostmot2.so
+Linking ../rtlib/hm2_test.so
+Linking ../rtlib/hm2_pci.so
+Linking ../rtlib/hm2_7i43.so
+Linking ../rtlib/hm2_7i90.so
+Linking ../rtlib/setsserial.so
+Linking ../rtlib/hm2_modbus.so
+Linking ../rtlib/hm2_eth.so
+Linking ../rtlib/hm2_spi.so
+Linking ../rtlib/hm2_rpspi.so
+Linking ../rtlib/hm2_spix.so
+Linking ../rtlib/classicladder_rt.so
+Linking ../rtlib/scope_rt.so
+Linking ../rtlib/hal_lib.so
+Linking ../rtlib/trivkins.so
+Linking ../rtlib/maxkins.so
+Linking ../rtlib/rotatekins.so
+Linking ../rtlib/tripodkins.so
+Linking ../rtlib/corexykins.so
+Linking ../rtlib/pentakins.so
+Linking ../rtlib/lineardeltakins.so
+Linking ../rtlib/rotarydeltakins.so
+Linking ../rtlib/rosekins.so
+Linking ../rtlib/scorbot-kins.so
+Linking ../rtlib/genhexkins.so
+Linking ../rtlib/genserkins.so
+Linking ../rtlib/xyzac-trt-kins.so
+Linking ../rtlib/xyzbc-trt-kins.so
+Linking ../rtlib/scarakins.so
+Linking ../rtlib/pumakins.so
+Linking ../rtlib/three21kins.so
+Linking ../rtlib/5axiskins.so
+Linking ../rtlib/motmod.so
+Linking ../rtlib/homemod.so
+Linking ../rtlib/tpmod.so
+ln -sf libposemath.so.0 ../lib/libposemath.so
+ln -sf libnml.so.0 ../lib/libnml.so
+ln -sf liblinuxcnc-uspace-posix.so.0 ../lib/liblinuxcnc-uspace-posix.so
+Linking halstreamer
+Linking halsampler
+Linking panelui
+Linking mb2hal
+Linking gs2_vfd
+Linking hy_gt_vfd
+Linking svd-ps_vfd
+Linking shuttle
+Linking xhc-hb04
+Linking sendkeys
+Preprocessing thermistor.comp
+Linking vfs11_vfd
+Linking halcmd
+Linking halrmt
+Linking vfdb_vfd
+Preprocessing wj200_vfd.comp
+Preprocessing pi500_vfd.comp
+Linking linuxcncrsh
+Linking schedrmt
+Linking linuxcnclcd
+Linking halui
+Linking linuxcncsvr
+ln -sf libpyplugin.so.0 ../lib/libpyplugin.so
+emc/Submakefile:Linking genserkins
+Linking ../rtlib/abs.so
+Linking ../rtlib/abs_sint.so
+Linking ../rtlib/and2.so
+Linking ../rtlib/anglejog.so
+Linking ../rtlib/axistest.so
+Linking ../rtlib/bin2gray.so
+Linking ../rtlib/biquad.so
+Linking ../rtlib/bitmerge.so
+Linking ../rtlib/bitslice.so
+Linking ../rtlib/bitwise.so
+Linking ../rtlib/bldc.so
+Linking ../rtlib/blend.so
+Linking ../rtlib/carousel.so
+Linking ../rtlib/charge_pump.so
+Linking ../rtlib/clarke2.so
+Linking ../rtlib/clarke3.so
+Linking ../rtlib/clarkeinv.so
+Linking ../rtlib/comp.so
+Linking ../rtlib/conv_bool_sint.so
+Linking ../rtlib/conv_bool_real.so
+Linking ../rtlib/conv_bool_uint.so
+Linking ../rtlib/conv_real_sint.so
+Linking ../rtlib/conv_real_uint.so
+Linking ../rtlib/conv_sint_bool.so
+Linking ../rtlib/conv_sint_real.so
+Linking ../rtlib/conv_sint_uint.so
+Linking ../rtlib/conv_uint_bool.so
+Linking ../rtlib/conv_uint_real.so
+Linking ../rtlib/conv_uint_sint.so
+Linking ../rtlib/corexy_by_hal.so
+Linking ../rtlib/dbounce.so
+Linking ../rtlib/ddt.so
+Linking ../rtlib/deadzone.so
+Linking ../rtlib/demux.so
+Linking ../rtlib/differential.so
+Linking ../rtlib/div2.so
+Linking ../rtlib/edge.so
+Linking ../rtlib/eoffset_per_angle.so
+Linking ../rtlib/estop_latch.so
+Linking ../rtlib/feedcomp.so
+Linking ../rtlib/filter_kalman.so
+Linking ../rtlib/flipflop.so
+Linking ../rtlib/gantry.so
+Linking ../rtlib/gearchange.so
+Linking ../rtlib/gray2bin.so
+Linking ../rtlib/histobins.so
+Linking ../rtlib/histobinstream.so
+Linking ../rtlib/homecomp.so
+Linking ../rtlib/hypot.so
+Linking ../rtlib/ilowpass.so
+Linking ../rtlib/integ.so
+Linking ../rtlib/invert.so
+Linking ../rtlib/joint_axis_mapper.so
+Linking ../rtlib/joyhandle.so
+Linking ../rtlib/laserpower.so
+Linking ../rtlib/knob2float.so
+Linking ../rtlib/latencybins.so
+Linking ../rtlib/latencybinstream.so
+Linking ../rtlib/led_dim.so
+Linking ../rtlib/limit1.so
+Linking ../rtlib/limit2.so
+Linking ../rtlib/limit3.so
+Linking ../rtlib/limit_axis.so
+Linking ../rtlib/lincurve.so
+Linking ../rtlib/logic.so
+Linking ../rtlib/lowpass.so
+Linking ../rtlib/lut5.so
+Linking ../rtlib/maj3.so
+Linking ../rtlib/match8.so
+Linking ../rtlib/matrixkins.so
+Linking ../rtlib/max31855.so
+Linking ../rtlib/mc_axis.so
+Linking ../rtlib/mesa_pktgyro_test.so
+Linking ../rtlib/message.so
+Linking ../rtlib/millturn.so
+Linking ../rtlib/minmax.so
+Linking ../rtlib/momentary2nist.so
+Linking ../rtlib/moveoff.so
+Linking ../rtlib/mult2.so
+Linking ../rtlib/multiclick.so
+Linking ../rtlib/multiswitch.so
+Linking ../rtlib/mux16.so
+Linking ../rtlib/mux2.so
+Linking ../rtlib/mux4.so
+Linking ../rtlib/mux8.so
+Linking ../rtlib/near.so
+Linking ../rtlib/not.so
+Linking ../rtlib/offset.so
+Linking ../rtlib/ohmic.so
+Linking ../rtlib/oneshot.so
+Linking ../rtlib/or2.so
+Linking ../rtlib/orient.so
+Linking ../rtlib/output_buffer.so
+Linking ../rtlib/plasmac.so
+Linking ../rtlib/pushmsg.so
+Linking ../rtlib/radiobutton.so
+Linking ../rtlib/raster.so
+Linking ../rtlib/reset.so
+Linking ../rtlib/safety_latch.so
+Linking ../rtlib/sample_hold.so
+Linking ../rtlib/scale.so
+Linking ../rtlib/scaled_sint_sums.so
+Linking ../rtlib/select8.so
+Linking ../rtlib/sim_axis_hardware.so
+Linking ../rtlib/sim_home_switch.so
+Linking ../rtlib/sim_matrix_kb.so
+Linking ../rtlib/sim_parport.so
+Linking ../rtlib/sim_spindle.so
+Linking ../rtlib/simple_tp.so
+Linking ../rtlib/spindle.so
+Linking ../rtlib/sphereprobe.so
+Linking ../rtlib/spindle_monitor.so
+Linking ../rtlib/steptest.so
+Linking ../rtlib/sum2.so
+Linking ../rtlib/tap.so
+Linking ../rtlib/thc.so
+Linking ../rtlib/thcud.so
+Linking ../rtlib/threadtest.so
+Linking ../rtlib/time.so
+Linking ../rtlib/timedelay.so
+Linking ../rtlib/timedelta.so
+Linking ../rtlib/tof.so
+Linking ../rtlib/toggle.so
+Linking ../rtlib/toggle2nist.so
+Linking ../rtlib/ton.so
+Linking ../rtlib/tp.so
+Linking ../rtlib/tristate_bit.so
+Linking ../rtlib/tristate_float.so
+Linking ../rtlib/updown.so
+Linking ../rtlib/userkins.so
+Linking ../rtlib/wcomp.so
+Linking ../rtlib/xhc_hb04_util.so
+Linking ../rtlib/xor2.so
+Linking ../rtlib/xyzab_tdr_kins.so
+Linking ../rtlib/xyzacb_trsrn.so
+Linking ../rtlib/xyzbca_trsrn.so
+Linking ../rtlib/serport.so
+Linking ../rtlib/mesa_7i65.so
+Linking ../rtlib/mesa_uart.so
+Compiling objects/hal/user_comps/thermistor.c
+Compiling hal/user_comps/wj200_vfd/wj200_vfd.c
+Compiling hal/user_comps/pi500_vfd/pi500_vfd.c
+Linking librs274.so.0
+c++ -std=gnu++20 -g -L/home/user/wt/mcaxis/lib -Wl,-rpath,/home/user/wt/mcaxis/lib -ltirpc   -Xlinker -export-dynamic -Wl,-O1 -Wl,-Bsymbolic-functions -Wl,-soname,librs274.so.0 -shared -o ../lib/librs274.so.0 objects/emc/rs274ngc/interp_arc.o objects/emc/rs274ngc/interp_array.o objects/emc/rs274ngc/interp_base.o objects/emc/rs274ngc/interp_check.o objects/emc/rs274ngc/interp_convert.o objects/emc/rs274ngc/interp_queue.o objects/emc/rs274ngc/interp_cycles.o objects/emc/rs274ngc/interp_execute.o objects/emc/rs274ngc/interp_find.o objects/emc/rs274ngc/interp_internal.o objects/emc/rs274ngc/interp_inverse.o objects/emc/rs274ngc/interp_read.o objects/emc/rs274ngc/interp_write.o objects/emc/rs274ngc/interp_o_word.o objects/emc/rs274ngc/interp_g7x.o objects/emc/rs274ngc/nurbs_additional_functions.o objects/emc/rs274ngc/interp_namedparams.o objects/emc/rs274ngc/interp_python.o objects/emc/rs274ngc/interp_remap.o objects/emc/rs274ngc/interp_setup.o objects/emc/rs274ngc/canonmodule.o objects/emc/rs274ngc/pyparamclass.o objects/emc/rs274ngc/pyemctypes.o objects/emc/rs274ngc/pyinterp1.o objects/emc/rs274ngc/pyblock.o objects/emc/rs274ngc/pyarrays.o objects/emc/rs274ngc/interpmodule.o objects/emc/rs274ngc/rs274ngc_pre.o objects/emc/rs274ngc/interp_inspection.o objects/emc/nml_intf/modal_state.o ../lib/liblinuxcncini.so ../lib/libpyplugin.so ../lib/liblinuxcnchal.so.0 ../lib/libtooldata.so.0 -lstdc++ -lboost_python312 -L/usr/lib/x86_64-linux-gnu -lpython3.13 -ldl -lm
+Linking thermistor
+Linking wj200_vfd
+Linking pi500_vfd
+ln -sf librs274.so.0 ../lib/librs274.so
+Linking milltask
+Linking rs274
+c++ -std=gnu++20 -o ../bin/milltask objects/emc/motion/emcmotglb.o objects/emc/task/emctask.o objects/emc/task/emccanon.o objects/emc/task/emctaskmain.o objects/emc/motion/usrmotintf.o objects/emc/motion/emcmotutil.o objects/emc/task/taskintf.o objects/emc/motion/dbuf.o objects/emc/motion/stashf.o objects/emc/task/taskclass.o objects/emc/task/backtrace.o objects/emc/usr_intf/mapini.o ../lib/librs274.so.0 ../lib/liblinuxcnc.a ../lib/libnml.so.0 ../lib/liblinuxcncini.so.1 ../lib/libposemath.so.0 ../lib/liblinuxcnchal.so.0 ../lib/libpyplugin.so.0 ../lib/libtooldata.so.0 -L/home/user/wt/mcaxis/lib -Wl,-rpath,/home/user/wt/mcaxis/lib -ltirpc   -Xlinker -export-dynamic -Wl,-O1 -Wl,-Bsymbolic-functions -lboost_python312 -L/usr/lib/x86_64-linux-gnu -lpython3.13 -ldl -lm -lfmt
+Linking python module gcode.so
+c++ -std=gnu++20 -L/home/user/wt/mcaxis/lib -Wl,-rpath,/home/user/wt/mcaxis/lib -ltirpc   -shared -o ../lib/python/gcode.so objects/emc/rs274ngc/gcodemodule.o objects/emc/rs274ngc/gcode_renderer.o objects/emc/rs274ngc/time_estimate.o ../lib/librs274.so.0 -lstdc++
+Linking canterp.so
+You now need to run 'sudo make setuid' or 'sudo make setcap' in order to run in place with access to hardware.
+make: Leaving directory '/home/user/wt/mcaxis/src'
+make_exit=0

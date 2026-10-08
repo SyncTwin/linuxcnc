@@ -1,0 +1,4 @@
+Compiling realtime mc_axis.c
+Linking mc_axis.so
+halcompile exit=0
+-rw-r--r-- 1 root root 152344 Oct  8 13:23 mc_axis.so

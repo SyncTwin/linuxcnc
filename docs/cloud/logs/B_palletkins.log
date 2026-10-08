@@ -1,0 +1,10 @@
+# palletkins.c @70609d28 compiled with the build's own command + -Wextra:
+(no output = 0 warnings), exit 0
+
+# same command on palletkins.c @70609d28~1 (before 'mark the unused kinematics flags parameters'):
+palletkins_prev.c:44:41: warning: unused parameter 'fflags' [-Wunused-parameter]
+palletkins_prev.c:44:75: warning: unused parameter 'iflags' [-Wunused-parameter]
+palletkins_prev.c:60:41: warning: unused parameter 'iflags' [-Wunused-parameter]
+palletkins_prev.c:60:75: warning: unused parameter 'fflags' [-Wunused-parameter]
+
+# rtlib/palletkins.so 27960 bytes; exports: kinematicsForward kinematicsInverse kinematicsSwitch kinematicsSwitchable kinematicsType kinematicsTypeFlags

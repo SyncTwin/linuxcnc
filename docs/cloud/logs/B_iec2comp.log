@@ -1,0 +1,1009 @@
+$ iec2comp --help
+usage: iec2comp [-h] --thread-period NS [--thread THREAD] [--axis NAME=N]
+                [--name NAME] [-o OUTPUT]
+                program
+
+IEC 61131-3 program (ST/SFC) -> HAL component (.comp for halcompile) via the
+MATIEC compiler iec2c
+
+positional arguments:
+  program              program.st (one PROGRAM; FUNCTION_BLOCKs may precede
+                       it)
+
+options:
+  -h, --help           show this help message and exit
+  --thread-period NS   period of the HAL thread in ns: TASK INTERVAL and the
+                       tick of timers
+  --thread THREAD      thread for addf (default servo-thread)
+  --axis NAME=N        AXIS_REF variable NAME of VAR_EXTERNAL is mc-axis.N
+                       (repeatable)
+  --name NAME          component name (default iec_<program>)
+  -o, --output OUTPUT  directory for <name>.comp, <name>.hal and the headers
+exit=0
+
+# first attempt: blink.st with located and plain vars in ONE VAR block -> iec2c: "invalid located variable declaration" (input error, IEC grammar keeps located_var_declarations separate); fixed input below
+$ MATIEC=/home/user/matiec (9c75953) iec2comp blink.st --thread-period 1000000 -o OUT
+/tmp/claude-0/i2c/iec_blink.comp: halcompile --install /tmp/claude-0/i2c/iec_blink.comp
+exit=0
+accessor.h
+globals_instances_py.h
+globals_proto_c.h
+globals_ticktime_py.h
+iec_blink.comp
+iec_blink.hal
+iec_std_FB.h
+iec_std_FB_impl.h
+iec_std_FB_no_ENENO.h
+iec_std_FB_no_ENENO_impl.h
+iec_std_functions.h
+iec_std_lib.h
+iec_types.h
+iec_types_all.h
+iec_types_list.h
+pous_decl_py.h
+pous_flatcount_c.h
+pous_flatcount_py.h
+pous_recurse_c.h
+undef_macros.h
+
+--- iec_blink.hal
+loadrt iec_blink
+addf iec-blink.0 servo-thread
+--- pins in .comp
+pin in bit permit "0 = program stopped, outputs at their -safe values";
+pin in bit enable "1 = run the program (AND permit)";
+pin out bit qx_0_0 "%QX0.0 lamp";
+pin in bit qx_0_0_safe "%QX0.0 while enable = 0: the safe value of the output";
+function _;
+
+$ halcompile --compile iec_blink.comp
+iec_blink.comp:4: Warning: Old type 'bit' has been replaced by 'bool'
+iec_blink.comp:5: Warning: Old type 'bit' has been replaced by 'bool'
+iec_blink.comp:6: Warning: Old type 'bit' has been replaced by 'bool'
+iec_blink.comp:7: Warning: Old type 'bit' has been replaced by 'bool'
+Compiling realtime iec_blink.c
+In file included from iec_blink.comp:22:
+/tmp/claude-0/i2c/iec_std_lib.h: In function ‘__string_to_time’:
+/tmp/claude-0/i2c/iec_std_lib.h:681:41: warning: pointer targets in passing argument 1 of ‘__iec_lib_atof’ differ in signedness [-Wpointer-sign]
+  681 |         LREAL IN_val = __iec_lib_atof(IN.body, IN.len);
+      |                                       ~~^~~~~
+      |                                         |
+      |                                         uint8_t * {aka unsigned char *}
+/tmp/claude-0/i2c/iec_std_lib.h:547:42: note: expected ‘char *’ but argument is of type ‘uint8_t *’ {aka ‘unsigned char *’}
+  547 | static inline LREAL __iec_lib_atof(char *str, __strlen_t l) {
+      |                                    ~~~~~~^~~
+In file included from /tmp/claude-0/i2c/iec_std_lib.h:848:
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___ROR__BOOL__SINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:730:77: warning: unused parameter ‘N’ [-Wunused-parameter]
+  730 | static inline BOOL ___ROR__BOOL__##TYPENAME(EN_ENO_PARAMS BOOL IN, TYPENAME N) { \
+/tmp/claude-0/i2c/iec_types_list.h:20:35: note: in expansion of macro ‘__iec_’
+   20 | #define __ANY_SINT(DO)            DO(SINT) DO(INT) DO(DINT) DO(LINT)
+      |                                   ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:35: note: in expansion of macro ‘__ANY_SINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                   ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:734:1: note: in expansion of macro ‘__ANY_INT’
+  734 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___ROR__BOOL__INT’:
+/tmp/claude-0/i2c/iec_std_functions.h:730:77: warning: unused parameter ‘N’ [-Wunused-parameter]
+  730 | static inline BOOL ___ROR__BOOL__##TYPENAME(EN_ENO_PARAMS BOOL IN, TYPENAME N) { \
+/tmp/claude-0/i2c/iec_types_list.h:20:44: note: in expansion of macro ‘__iec_’
+   20 | #define __ANY_SINT(DO)            DO(SINT) DO(INT) DO(DINT) DO(LINT)
+      |                                            ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:35: note: in expansion of macro ‘__ANY_SINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                   ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:734:1: note: in expansion of macro ‘__ANY_INT’
+  734 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___ROR__BOOL__DINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:730:77: warning: unused parameter ‘N’ [-Wunused-parameter]
+  730 | static inline BOOL ___ROR__BOOL__##TYPENAME(EN_ENO_PARAMS BOOL IN, TYPENAME N) { \
+/tmp/claude-0/i2c/iec_types_list.h:20:52: note: in expansion of macro ‘__iec_’
+   20 | #define __ANY_SINT(DO)            DO(SINT) DO(INT) DO(DINT) DO(LINT)
+      |                                                    ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:35: note: in expansion of macro ‘__ANY_SINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                   ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:734:1: note: in expansion of macro ‘__ANY_INT’
+  734 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___ROR__BOOL__LINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:730:77: warning: unused parameter ‘N’ [-Wunused-parameter]
+  730 | static inline BOOL ___ROR__BOOL__##TYPENAME(EN_ENO_PARAMS BOOL IN, TYPENAME N) { \
+/tmp/claude-0/i2c/iec_types_list.h:20:61: note: in expansion of macro ‘__iec_’
+   20 | #define __ANY_SINT(DO)            DO(SINT) DO(INT) DO(DINT) DO(LINT)
+      |                                                             ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:35: note: in expansion of macro ‘__ANY_SINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                   ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:734:1: note: in expansion of macro ‘__ANY_INT’
+  734 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___ROR__BOOL__USINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:730:77: warning: unused parameter ‘N’ [-Wunused-parameter]
+  730 | static inline BOOL ___ROR__BOOL__##TYPENAME(EN_ENO_PARAMS BOOL IN, TYPENAME N) { \
+/tmp/claude-0/i2c/iec_types_list.h:21:35: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                   ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:734:1: note: in expansion of macro ‘__ANY_INT’
+  734 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___ROR__BOOL__UINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:730:77: warning: unused parameter ‘N’ [-Wunused-parameter]
+  730 | static inline BOOL ___ROR__BOOL__##TYPENAME(EN_ENO_PARAMS BOOL IN, TYPENAME N) { \
+/tmp/claude-0/i2c/iec_types_list.h:21:45: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                             ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:734:1: note: in expansion of macro ‘__ANY_INT’
+  734 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___ROR__BOOL__UDINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:730:77: warning: unused parameter ‘N’ [-Wunused-parameter]
+  730 | static inline BOOL ___ROR__BOOL__##TYPENAME(EN_ENO_PARAMS BOOL IN, TYPENAME N) { \
+/tmp/claude-0/i2c/iec_types_list.h:21:54: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                                      ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:734:1: note: in expansion of macro ‘__ANY_INT’
+  734 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___ROR__BOOL__ULINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:730:77: warning: unused parameter ‘N’ [-Wunused-parameter]
+  730 | static inline BOOL ___ROR__BOOL__##TYPENAME(EN_ENO_PARAMS BOOL IN, TYPENAME N) { \
+/tmp/claude-0/i2c/iec_types_list.h:21:64: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                                                ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:734:1: note: in expansion of macro ‘__ANY_INT’
+  734 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___ROL__BOOL__SINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:753:77: warning: unused parameter ‘N’ [-Wunused-parameter]
+  753 | static inline BOOL ___ROL__BOOL__##TYPENAME(EN_ENO_PARAMS BOOL IN, TYPENAME N) { \
+/tmp/claude-0/i2c/iec_types_list.h:20:35: note: in expansion of macro ‘__iec_’
+   20 | #define __ANY_SINT(DO)            DO(SINT) DO(INT) DO(DINT) DO(LINT)
+      |                                   ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:35: note: in expansion of macro ‘__ANY_SINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                   ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:757:1: note: in expansion of macro ‘__ANY_INT’
+  757 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___ROL__BOOL__INT’:
+/tmp/claude-0/i2c/iec_std_functions.h:753:77: warning: unused parameter ‘N’ [-Wunused-parameter]
+  753 | static inline BOOL ___ROL__BOOL__##TYPENAME(EN_ENO_PARAMS BOOL IN, TYPENAME N) { \
+/tmp/claude-0/i2c/iec_types_list.h:20:44: note: in expansion of macro ‘__iec_’
+   20 | #define __ANY_SINT(DO)            DO(SINT) DO(INT) DO(DINT) DO(LINT)
+      |                                            ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:35: note: in expansion of macro ‘__ANY_SINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                   ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:757:1: note: in expansion of macro ‘__ANY_INT’
+  757 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___ROL__BOOL__DINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:753:77: warning: unused parameter ‘N’ [-Wunused-parameter]
+  753 | static inline BOOL ___ROL__BOOL__##TYPENAME(EN_ENO_PARAMS BOOL IN, TYPENAME N) { \
+/tmp/claude-0/i2c/iec_types_list.h:20:52: note: in expansion of macro ‘__iec_’
+   20 | #define __ANY_SINT(DO)            DO(SINT) DO(INT) DO(DINT) DO(LINT)
+      |                                                    ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:35: note: in expansion of macro ‘__ANY_SINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                   ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:757:1: note: in expansion of macro ‘__ANY_INT’
+  757 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___ROL__BOOL__LINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:753:77: warning: unused parameter ‘N’ [-Wunused-parameter]
+  753 | static inline BOOL ___ROL__BOOL__##TYPENAME(EN_ENO_PARAMS BOOL IN, TYPENAME N) { \
+/tmp/claude-0/i2c/iec_types_list.h:20:61: note: in expansion of macro ‘__iec_’
+   20 | #define __ANY_SINT(DO)            DO(SINT) DO(INT) DO(DINT) DO(LINT)
+      |                                                             ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:35: note: in expansion of macro ‘__ANY_SINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                   ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:757:1: note: in expansion of macro ‘__ANY_INT’
+  757 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___ROL__BOOL__USINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:753:77: warning: unused parameter ‘N’ [-Wunused-parameter]
+  753 | static inline BOOL ___ROL__BOOL__##TYPENAME(EN_ENO_PARAMS BOOL IN, TYPENAME N) { \
+/tmp/claude-0/i2c/iec_types_list.h:21:35: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                   ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:757:1: note: in expansion of macro ‘__ANY_INT’
+  757 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___ROL__BOOL__UINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:753:77: warning: unused parameter ‘N’ [-Wunused-parameter]
+  753 | static inline BOOL ___ROL__BOOL__##TYPENAME(EN_ENO_PARAMS BOOL IN, TYPENAME N) { \
+/tmp/claude-0/i2c/iec_types_list.h:21:45: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                             ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:757:1: note: in expansion of macro ‘__ANY_INT’
+  757 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___ROL__BOOL__UDINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:753:77: warning: unused parameter ‘N’ [-Wunused-parameter]
+  753 | static inline BOOL ___ROL__BOOL__##TYPENAME(EN_ENO_PARAMS BOOL IN, TYPENAME N) { \
+/tmp/claude-0/i2c/iec_types_list.h:21:54: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                                      ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:757:1: note: in expansion of macro ‘__ANY_INT’
+  757 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___ROL__BOOL__ULINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:753:77: warning: unused parameter ‘N’ [-Wunused-parameter]
+  753 | static inline BOOL ___ROL__BOOL__##TYPENAME(EN_ENO_PARAMS BOOL IN, TYPENAME N) { \
+/tmp/claude-0/i2c/iec_types_list.h:21:64: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                                                ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:757:1: note: in expansion of macro ‘__ANY_INT’
+  757 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___LEFT__STRING__STRING__USINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1326:28: warning: comparison is always false due to limited range of data type [-Wtype-limits]
+ 1326 |     TEST_EN_COND(STRING, L < 0)\
+      |                            ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:35: note: in expansion of macro ‘__left’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                   ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1333:1: note: in expansion of macro ‘__ANY_INT’
+ 1333 | __ANY_INT(__left)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___LEFT__STRING__STRING__UINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1326:28: warning: comparison is always false due to limited range of data type [-Wtype-limits]
+ 1326 |     TEST_EN_COND(STRING, L < 0)\
+      |                            ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:45: note: in expansion of macro ‘__left’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                             ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1333:1: note: in expansion of macro ‘__ANY_INT’
+ 1333 | __ANY_INT(__left)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___LEFT__STRING__STRING__UDINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1326:28: warning: comparison of unsigned expression in ‘< 0’ is always false [-Wtype-limits]
+ 1326 |     TEST_EN_COND(STRING, L < 0)\
+      |                            ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:54: note: in expansion of macro ‘__left’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                                      ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1333:1: note: in expansion of macro ‘__ANY_INT’
+ 1333 | __ANY_INT(__left)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___LEFT__STRING__STRING__ULINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1326:28: warning: comparison of unsigned expression in ‘< 0’ is always false [-Wtype-limits]
+ 1326 |     TEST_EN_COND(STRING, L < 0)\
+      |                            ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:64: note: in expansion of macro ‘__left’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                                                ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1333:1: note: in expansion of macro ‘__ANY_INT’
+ 1333 | __ANY_INT(__left)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___RIGHT__STRING__STRING__USINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1343:26: warning: comparison is always false due to limited range of data type [-Wtype-limits]
+ 1343 |   TEST_EN_COND(STRING, L < 0)\
+      |                          ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:35: note: in expansion of macro ‘__right’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                   ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1350:1: note: in expansion of macro ‘__ANY_INT’
+ 1350 | __ANY_INT(__right)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___RIGHT__STRING__STRING__UINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1343:26: warning: comparison is always false due to limited range of data type [-Wtype-limits]
+ 1343 |   TEST_EN_COND(STRING, L < 0)\
+      |                          ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:45: note: in expansion of macro ‘__right’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                             ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1350:1: note: in expansion of macro ‘__ANY_INT’
+ 1350 | __ANY_INT(__right)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___RIGHT__STRING__STRING__UDINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1343:26: warning: comparison of unsigned expression in ‘< 0’ is always false [-Wtype-limits]
+ 1343 |   TEST_EN_COND(STRING, L < 0)\
+      |                          ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:54: note: in expansion of macro ‘__right’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                                      ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1350:1: note: in expansion of macro ‘__ANY_INT’
+ 1350 | __ANY_INT(__right)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___RIGHT__STRING__STRING__ULINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1343:26: warning: comparison of unsigned expression in ‘< 0’ is always false [-Wtype-limits]
+ 1343 |   TEST_EN_COND(STRING, L < 0)\
+      |                          ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:64: note: in expansion of macro ‘__right’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                                                ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1350:1: note: in expansion of macro ‘__ANY_INT’
+ 1350 | __ANY_INT(__right)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___MID__STRING__STRING__USINT__USINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1360:26: warning: comparison is always false due to limited range of data type [-Wtype-limits]
+ 1360 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                          ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:35: note: in expansion of macro ‘__mid’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                   ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1370:1: note: in expansion of macro ‘__ANY_INT’
+ 1370 | __ANY_INT(__mid)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1360:35: warning: comparison is always false due to limited range of data type [-Wtype-limits]
+ 1360 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                                   ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:35: note: in expansion of macro ‘__mid’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                   ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1370:1: note: in expansion of macro ‘__ANY_INT’
+ 1370 | __ANY_INT(__mid)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___MID__STRING__STRING__UINT__UINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1360:26: warning: comparison is always false due to limited range of data type [-Wtype-limits]
+ 1360 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                          ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:45: note: in expansion of macro ‘__mid’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                             ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1370:1: note: in expansion of macro ‘__ANY_INT’
+ 1370 | __ANY_INT(__mid)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1360:35: warning: comparison is always false due to limited range of data type [-Wtype-limits]
+ 1360 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                                   ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:45: note: in expansion of macro ‘__mid’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                             ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1370:1: note: in expansion of macro ‘__ANY_INT’
+ 1370 | __ANY_INT(__mid)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___MID__STRING__STRING__UDINT__UDINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1360:26: warning: comparison of unsigned expression in ‘< 0’ is always false [-Wtype-limits]
+ 1360 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                          ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:54: note: in expansion of macro ‘__mid’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                                      ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1370:1: note: in expansion of macro ‘__ANY_INT’
+ 1370 | __ANY_INT(__mid)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1360:35: warning: comparison of unsigned expression in ‘< 0’ is always false [-Wtype-limits]
+ 1360 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                                   ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:54: note: in expansion of macro ‘__mid’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                                      ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1370:1: note: in expansion of macro ‘__ANY_INT’
+ 1370 | __ANY_INT(__mid)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___MID__STRING__STRING__ULINT__ULINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1360:26: warning: comparison of unsigned expression in ‘< 0’ is always false [-Wtype-limits]
+ 1360 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                          ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:64: note: in expansion of macro ‘__mid’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                                                ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1370:1: note: in expansion of macro ‘__ANY_INT’
+ 1370 | __ANY_INT(__mid)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1360:35: warning: comparison of unsigned expression in ‘< 0’ is always false [-Wtype-limits]
+ 1360 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                                   ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:64: note: in expansion of macro ‘__mid’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                                                ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1370:1: note: in expansion of macro ‘__ANY_INT’
+ 1370 | __ANY_INT(__mid)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___INSERT__STRING__STRING__STRING__USINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1429:26: warning: comparison is always false due to limited range of data type [-Wtype-limits]
+ 1429 |   TEST_EN_COND(STRING, P < 0)\
+      |                          ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:35: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                   ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1432:1: note: in expansion of macro ‘__ANY_INT’
+ 1432 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___INSERT__STRING__STRING__STRING__UINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1429:26: warning: comparison is always false due to limited range of data type [-Wtype-limits]
+ 1429 |   TEST_EN_COND(STRING, P < 0)\
+      |                          ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:45: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                             ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1432:1: note: in expansion of macro ‘__ANY_INT’
+ 1432 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___INSERT__STRING__STRING__STRING__UDINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1429:26: warning: comparison of unsigned expression in ‘< 0’ is always false [-Wtype-limits]
+ 1429 |   TEST_EN_COND(STRING, P < 0)\
+      |                          ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:54: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                                      ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1432:1: note: in expansion of macro ‘__ANY_INT’
+ 1432 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___INSERT__STRING__STRING__STRING__ULINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1429:26: warning: comparison of unsigned expression in ‘< 0’ is always false [-Wtype-limits]
+ 1429 |   TEST_EN_COND(STRING, P < 0)\
+      |                          ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:64: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                                                ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1432:1: note: in expansion of macro ‘__ANY_INT’
+ 1432 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___DELETE__STRING__STRING__USINT__USINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1460:26: warning: comparison is always false due to limited range of data type [-Wtype-limits]
+ 1460 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                          ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:35: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                   ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1463:1: note: in expansion of macro ‘__ANY_INT’
+ 1463 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1460:35: warning: comparison is always false due to limited range of data type [-Wtype-limits]
+ 1460 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                                   ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:35: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                   ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1463:1: note: in expansion of macro ‘__ANY_INT’
+ 1463 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___DELETE__STRING__STRING__UINT__UINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1460:26: warning: comparison is always false due to limited range of data type [-Wtype-limits]
+ 1460 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                          ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:45: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                             ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1463:1: note: in expansion of macro ‘__ANY_INT’
+ 1463 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1460:35: warning: comparison is always false due to limited range of data type [-Wtype-limits]
+ 1460 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                                   ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:45: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                             ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1463:1: note: in expansion of macro ‘__ANY_INT’
+ 1463 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___DELETE__STRING__STRING__UDINT__UDINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1460:26: warning: comparison of unsigned expression in ‘< 0’ is always false [-Wtype-limits]
+ 1460 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                          ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:54: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                                      ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1463:1: note: in expansion of macro ‘__ANY_INT’
+ 1463 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1460:35: warning: comparison of unsigned expression in ‘< 0’ is always false [-Wtype-limits]
+ 1460 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                                   ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:54: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                                      ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1463:1: note: in expansion of macro ‘__ANY_INT’
+ 1463 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___DELETE__STRING__STRING__ULINT__ULINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1460:26: warning: comparison of unsigned expression in ‘< 0’ is always false [-Wtype-limits]
+ 1460 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                          ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:64: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                                                ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1463:1: note: in expansion of macro ‘__ANY_INT’
+ 1463 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1460:35: warning: comparison of unsigned expression in ‘< 0’ is always false [-Wtype-limits]
+ 1460 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                                   ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:64: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                                                ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1463:1: note: in expansion of macro ‘__ANY_INT’
+ 1463 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___REPLACE__STRING__STRING__STRING__USINT__USINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1501:26: warning: comparison is always false due to limited range of data type [-Wtype-limits]
+ 1501 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                          ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:35: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                   ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1504:1: note: in expansion of macro ‘__ANY_INT’
+ 1504 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1501:35: warning: comparison is always false due to limited range of data type [-Wtype-limits]
+ 1501 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                                   ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:35: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                   ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1504:1: note: in expansion of macro ‘__ANY_INT’
+ 1504 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___REPLACE__STRING__STRING__STRING__UINT__UINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1501:26: warning: comparison is always false due to limited range of data type [-Wtype-limits]
+ 1501 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                          ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:45: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                             ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1504:1: note: in expansion of macro ‘__ANY_INT’
+ 1504 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1501:35: warning: comparison is always false due to limited range of data type [-Wtype-limits]
+ 1501 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                                   ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:45: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                             ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1504:1: note: in expansion of macro ‘__ANY_INT’
+ 1504 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___REPLACE__STRING__STRING__STRING__UDINT__UDINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1501:26: warning: comparison of unsigned expression in ‘< 0’ is always false [-Wtype-limits]
+ 1501 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                          ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:54: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                                      ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1504:1: note: in expansion of macro ‘__ANY_INT’
+ 1504 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1501:35: warning: comparison of unsigned expression in ‘< 0’ is always false [-Wtype-limits]
+ 1501 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                                   ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:54: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                                      ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1504:1: note: in expansion of macro ‘__ANY_INT’
+ 1504 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h: In function ‘___REPLACE__STRING__STRING__STRING__ULINT__ULINT’:
+/tmp/claude-0/i2c/iec_std_functions.h:1501:26: warning: comparison of unsigned expression in ‘< 0’ is always false [-Wtype-limits]
+ 1501 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                          ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:64: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                                                ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1504:1: note: in expansion of macro ‘__ANY_INT’
+ 1504 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1501:35: warning: comparison of unsigned expression in ‘< 0’ is always false [-Wtype-limits]
+ 1501 |   TEST_EN_COND(STRING, L < 0 || P < 0)\
+      |                                   ^
+/tmp/claude-0/i2c/iec_std_functions.h:110:17: note: in definition of macro ‘TEST_EN_COND’
+  110 |     if (!EN || (COND)) {\
+      |                 ^~~~
+/tmp/claude-0/i2c/iec_types_list.h:21:64: note: in expansion of macro ‘__iec_’
+   21 | #define __ANY_UINT(DO)            DO(USINT) DO(UINT) DO(UDINT) DO(ULINT)
+      |                                                                ^~
+/tmp/claude-0/i2c/iec_types_list.h:19:50: note: in expansion of macro ‘__ANY_UINT’
+   19 | #define __ANY_INT(DO)             __ANY_SINT(DO) __ANY_UINT(DO)
+      |                                                  ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_functions.h:1504:1: note: in expansion of macro ‘__ANY_INT’
+ 1504 | __ANY_INT(__iec_)
+      | ^~~~~~~~~
+iec_blink.comp: At top level:
+iec_blink.comp:875:13: warning: ‘iec_issue’ defined but not used [-Wunused-function]
+iec_blink.comp:725:13: warning: ‘MC_READAXISERROR_body__’ defined but not used [-Wunused-function]
+iec_blink.comp:708:13: warning: ‘MC_READAXISERROR_init__’ defined but not used [-Wunused-function]
+iec_blink.comp:670:13: warning: ‘MC_POWER_body__’ defined but not used [-Wunused-function]
+iec_blink.comp:654:13: warning: ‘MC_POWER_init__’ defined but not used [-Wunused-function]
+iec_blink.comp:612:13: warning: ‘MC_SETPOSITION_body__’ defined but not used [-Wunused-function]
+iec_blink.comp:590:13: warning: ‘MC_SETPOSITION_init__’ defined but not used [-Wunused-function]
+iec_blink.comp:548:13: warning: ‘MC_RESET_body__’ defined but not used [-Wunused-function]
+iec_blink.comp:528:13: warning: ‘MC_RESET_init__’ defined but not used [-Wunused-function]
+iec_blink.comp:486:13: warning: ‘MC_HALT_body__’ defined but not used [-Wunused-function]
+iec_blink.comp:463:13: warning: ‘MC_HALT_init__’ defined but not used [-Wunused-function]
+iec_blink.comp:419:13: warning: ‘MC_MOVEVELOCITY_body__’ defined but not used [-Wunused-function]
+iec_blink.comp:392:13: warning: ‘MC_MOVEVELOCITY_init__’ defined but not used [-Wunused-function]
+iec_blink.comp:349:13: warning: ‘MC_MOVERELATIVE_body__’ defined but not used [-Wunused-function]
+iec_blink.comp:322:13: warning: ‘MC_MOVERELATIVE_init__’ defined but not used [-Wunused-function]
+iec_blink.comp:279:13: warning: ‘MC_MOVEABSOLUTE_body__’ defined but not used [-Wunused-function]
+iec_blink.comp:252:13: warning: ‘MC_MOVEABSOLUTE_init__’ defined but not used [-Wunused-function]
+In file included from iec_blink.comp:212:
+/tmp/claude-0/i2c/iec_std_FB_impl.h:1376:13: warning: ‘SEMA_body__’ defined but not used [-Wunused-function]
+ 1376 | static void SEMA_body__(SEMA_data__ *data__) {
+      |             ^~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:1365:13: warning: ‘SEMA_init__’ defined but not used [-Wunused-function]
+ 1365 | static void SEMA_init__(SEMA_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:1326:13: warning: ‘RTC_body__’ defined but not used [-Wunused-function]
+ 1326 | static void RTC_body__(RTC_data__ *data__) {
+      |             ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:1312:13: warning: ‘RTC_init__’ defined but not used [-Wunused-function]
+ 1312 | static void RTC_init__(RTC_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:1271:13: warning: ‘RAMP_body__’ defined but not used [-Wunused-function]
+ 1271 | static void RAMP_body__(RAMP_data__ *data__) {
+      |             ^~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:1255:13: warning: ‘RAMP_init__’ defined but not used [-Wunused-function]
+ 1255 | static void RAMP_init__(RAMP_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:1220:13: warning: ‘PID_body__’ defined but not used [-Wunused-function]
+ 1220 | static void PID_body__(PID_data__ *data__) {
+      |             ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:1201:13: warning: ‘PID_init__’ defined but not used [-Wunused-function]
+ 1201 | static void PID_init__(PID_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:1126:13: warning: ‘HYSTERESIS_body__’ defined but not used [-Wunused-function]
+ 1126 | static void HYSTERESIS_body__(HYSTERESIS_data__ *data__) {
+      |             ^~~~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:1115:13: warning: ‘HYSTERESIS_init__’ defined but not used [-Wunused-function]
+ 1115 | static void HYSTERESIS_init__(HYSTERESIS_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:1018:13: warning: ‘TOF_body__’ defined but not used [-Wunused-function]
+ 1018 | static void TOF_body__(TOF_data__ *data__) {
+      |             ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:1003:13: warning: ‘TOF_init__’ defined but not used [-Wunused-function]
+ 1003 | static void TOF_init__(TOF_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:954:13: warning: ‘TON_body__’ defined but not used [-Wunused-function]
+  954 | static void TON_body__(TON_data__ *data__) {
+      |             ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:939:13: warning: ‘TON_init__’ defined but not used [-Wunused-function]
+  939 | static void TON_init__(TON_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:892:13: warning: ‘TP_body__’ defined but not used [-Wunused-function]
+  892 | static void TP_body__(TP_data__ *data__) {
+      |             ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:877:13: warning: ‘TP_init__’ defined but not used [-Wunused-function]
+  877 | static void TP_init__(TP_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:835:13: warning: ‘CTUD_ULINT_body__’ defined but not used [-Wunused-function]
+  835 | static void CTUD_ULINT_body__(CTUD_ULINT_data__ *data__) {
+      |             ^~~~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:818:13: warning: ‘CTUD_ULINT_init__’ defined but not used [-Wunused-function]
+  818 | static void CTUD_ULINT_init__(CTUD_ULINT_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:776:13: warning: ‘CTUD_UDINT_body__’ defined but not used [-Wunused-function]
+  776 | static void CTUD_UDINT_body__(CTUD_UDINT_data__ *data__) {
+      |             ^~~~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:759:13: warning: ‘CTUD_UDINT_init__’ defined but not used [-Wunused-function]
+  759 | static void CTUD_UDINT_init__(CTUD_UDINT_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:717:13: warning: ‘CTUD_LINT_body__’ defined but not used [-Wunused-function]
+  717 | static void CTUD_LINT_body__(CTUD_LINT_data__ *data__) {
+      |             ^~~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:700:13: warning: ‘CTUD_LINT_init__’ defined but not used [-Wunused-function]
+  700 | static void CTUD_LINT_init__(CTUD_LINT_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:658:13: warning: ‘CTUD_DINT_body__’ defined but not used [-Wunused-function]
+  658 | static void CTUD_DINT_body__(CTUD_DINT_data__ *data__) {
+      |             ^~~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:641:13: warning: ‘CTUD_DINT_init__’ defined but not used [-Wunused-function]
+  641 | static void CTUD_DINT_init__(CTUD_DINT_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:599:13: warning: ‘CTUD_body__’ defined but not used [-Wunused-function]
+  599 | static void CTUD_body__(CTUD_data__ *data__) {
+      |             ^~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:582:13: warning: ‘CTUD_init__’ defined but not used [-Wunused-function]
+  582 | static void CTUD_init__(CTUD_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:551:13: warning: ‘CTD_ULINT_body__’ defined but not used [-Wunused-function]
+  551 | static void CTD_ULINT_body__(CTD_ULINT_data__ *data__) {
+      |             ^~~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:538:13: warning: ‘CTD_ULINT_init__’ defined but not used [-Wunused-function]
+  538 | static void CTD_ULINT_init__(CTD_ULINT_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:507:13: warning: ‘CTD_UDINT_body__’ defined but not used [-Wunused-function]
+  507 | static void CTD_UDINT_body__(CTD_UDINT_data__ *data__) {
+      |             ^~~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:494:13: warning: ‘CTD_UDINT_init__’ defined but not used [-Wunused-function]
+  494 | static void CTD_UDINT_init__(CTD_UDINT_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:463:13: warning: ‘CTD_LINT_body__’ defined but not used [-Wunused-function]
+  463 | static void CTD_LINT_body__(CTD_LINT_data__ *data__) {
+      |             ^~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:450:13: warning: ‘CTD_LINT_init__’ defined but not used [-Wunused-function]
+  450 | static void CTD_LINT_init__(CTD_LINT_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:419:13: warning: ‘CTD_DINT_body__’ defined but not used [-Wunused-function]
+  419 | static void CTD_DINT_body__(CTD_DINT_data__ *data__) {
+      |             ^~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:406:13: warning: ‘CTD_DINT_init__’ defined but not used [-Wunused-function]
+  406 | static void CTD_DINT_init__(CTD_DINT_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:375:13: warning: ‘CTD_body__’ defined but not used [-Wunused-function]
+  375 | static void CTD_body__(CTD_data__ *data__) {
+      |             ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:362:13: warning: ‘CTD_init__’ defined but not used [-Wunused-function]
+  362 | static void CTD_init__(CTD_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:331:13: warning: ‘CTU_ULINT_body__’ defined but not used [-Wunused-function]
+  331 | static void CTU_ULINT_body__(CTU_ULINT_data__ *data__) {
+      |             ^~~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:318:13: warning: ‘CTU_ULINT_init__’ defined but not used [-Wunused-function]
+  318 | static void CTU_ULINT_init__(CTU_ULINT_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:287:13: warning: ‘CTU_UDINT_body__’ defined but not used [-Wunused-function]
+  287 | static void CTU_UDINT_body__(CTU_UDINT_data__ *data__) {
+      |             ^~~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:274:13: warning: ‘CTU_UDINT_init__’ defined but not used [-Wunused-function]
+  274 | static void CTU_UDINT_init__(CTU_UDINT_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:243:13: warning: ‘CTU_LINT_body__’ defined but not used [-Wunused-function]
+  243 | static void CTU_LINT_body__(CTU_LINT_data__ *data__) {
+      |             ^~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:230:13: warning: ‘CTU_LINT_init__’ defined but not used [-Wunused-function]
+  230 | static void CTU_LINT_init__(CTU_LINT_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:199:13: warning: ‘CTU_DINT_body__’ defined but not used [-Wunused-function]
+  199 | static void CTU_DINT_body__(CTU_DINT_data__ *data__) {
+      |             ^~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:186:13: warning: ‘CTU_DINT_init__’ defined but not used [-Wunused-function]
+  186 | static void CTU_DINT_init__(CTU_DINT_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:155:13: warning: ‘CTU_body__’ defined but not used [-Wunused-function]
+  155 | static void CTU_body__(CTU_data__ *data__) {
+      |             ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:142:13: warning: ‘CTU_init__’ defined but not used [-Wunused-function]
+  142 | static void CTU_init__(CTU_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:118:13: warning: ‘RS_body__’ defined but not used [-Wunused-function]
+  118 | static void RS_body__(RS_data__ *data__) {
+      |             ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:108:13: warning: ‘RS_init__’ defined but not used [-Wunused-function]
+  108 | static void RS_init__(RS_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:84:13: warning: ‘SR_body__’ defined but not used [-Wunused-function]
+   84 | static void SR_body__(SR_data__ *data__) {
+      |             ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:74:13: warning: ‘SR_init__’ defined but not used [-Wunused-function]
+   74 | static void SR_init__(SR_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:49:13: warning: ‘F_TRIG_body__’ defined but not used [-Wunused-function]
+   49 | static void F_TRIG_body__(F_TRIG_data__ *data__) {
+      |             ^~~~~~~~~~~~~
+/tmp/claude-0/i2c/iec_std_FB_impl.h:39:13: warning: ‘F_TRIG_init__’ defined but not used [-Wunused-function]
+   39 | static void F_TRIG_init__(F_TRIG_data__ *data__, BOOL retain) {
+      |             ^~~~~~~~~~~~~
+Linking iec_blink.so
+exit=0
+-rw-r--r-- 1 root root 36144 Oct  8 13:28 /tmp/claude-0/i2c/iec_blink.so

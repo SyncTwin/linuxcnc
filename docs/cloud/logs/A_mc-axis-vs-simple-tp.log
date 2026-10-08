@@ -1,0 +1,37 @@
+Running test: tests/mc-axis-vs-simple-tp
++ set -e
++ timeout -k 5 120 halrun -f cmp.hal
+Note: realtime scheduling unavailable (sched_setscheduler SCHED_FIFO: Operation not permitted).
+  Process capabilities: cap_sys_nice=no cap_ipc_lock=no.
+  Falling back to POSIX non-realtime.
+  Fix: 'sudo make setcap' (preferred) or 'sudo make setuid' on rtapi_app.
+  Override (testing only): set LINUXCNC_FORCE_REALTIME=1.
+Note: Using POSIX non-realtime
+cmp.hal:1: Warning: HAL_LIB: HAL will pretend that the exact base period requested is possible.
+This mode is not suitable for running real hardware.
+No isolated CPU's found, expect some latency or set RTAPI_CPU_NUMBER to select CPU
+simple_tp: peak |v| 80.0000, peak |a| 500.000
+mc_axis: peak |v| 80.0000, peak |a| 500.000
+arrivals: 9, mc_axis minus simple_tp in periods: min -5, max 0
+enable 0 at 49.800 u/s: simple_tp stops after 6.175200, mc_axis after 6.200100
+largest |mc_axis - simple_tp| position difference: 0.075000 (periods recorded: 22332)
+ok: mc_axis track mode does what simple_tp does
+++ dirname /home/user/wt/mcaxis/include
++ TOPDIR=/home/user/wt/mcaxis
++ trap 'rm -f ref_simple_tp' EXIT
++ gcc -O2 -Wall -ffunction-sections -fdata-sections -DULAPI -I/home/user/wt/mcaxis/include -I/home/user/wt/mcaxis/src -I/home/user/wt/mcaxis/src/emc -I/home/user/wt/mcaxis/src/emc/motion -I/home/user/wt/mcaxis/src/emc/tp -I/home/user/wt/mcaxis/src/emc/nml_intf -o ref_simple_tp ref_simple_tp.c /home/user/wt/mcaxis/src/emc/motion/simple_tp.c /home/user/wt/mcaxis/src/emc/tp/sp_scurve.c -Wl,--gc-sections -lm
++ timeout -k 5 120 halrun -f cmpj.hal
+Note: realtime scheduling unavailable (sched_setscheduler SCHED_FIFO: Operation not permitted).
+  Process capabilities: cap_sys_nice=no cap_ipc_lock=no.
+  Falling back to POSIX non-realtime.
+  Fix: 'sudo make setcap' (preferred) or 'sudo make setuid' on rtapi_app.
+  Override (testing only): set LINUXCNC_FORCE_REALTIME=1.
+Note: Using POSIX non-realtime
+cmpj.hal:1: Warning: HAL_LIB: HAL will pretend that the exact base period requested is possible.
+This mode is not suitable for running real hardware.
+No isolated CPU's found, expect some latency or set RTAPI_CPU_NUMBER to select CPU
+mc_axis: peak |v| 50.0000, |a| 200.000, |j| 5001.0
+largest |mc_axis - simple_tp.c| position difference: 0.031385 at period 16032, phase 11 (moving target, 20 u/s) (TOL 0.075000, periods 20257)
+ok: mc_axis track mode with a jerk limit does what simple_tp.c does with max_jerk
++ rm -f ref_simple_tp
+Runtest: 1 tests run, 1 successful, 0 failed, 0 skipped, 0 shmem errors

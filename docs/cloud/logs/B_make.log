@@ -1,0 +1,266 @@
+# B: synctwin/2.10 @ 70609d28dc457aeb0889b68cccaa4071a6157d2c (git rev-parse origin/synctwin/2.10, checked before build)
+# cd src && ./autogen.sh && ./configure --with-realtime=uspace --disable-gtk --disable-gui --disable-manpages --disable-build-documentation && make -j4 V=1
+# full log 5298 lines; all compiler warnings of the build:
+objects/hal/components/cia402.c:517:86: warning: unused parameter ‘prefix’ [-Wunused-parameter]
+objects/hal/components/cia402.c:517:99: warning: unused parameter ‘extra_arg’ [-Wunused-parameter]
+# palletkins lines:
+2439:Compiling realtime emc/kinematics/palletkins.c
+2443:	-MP -MD -MF "objects/rtemc/kinematics/palletkins.d" -MT "objects/rtemc/kinematics/palletkins.o" \
+2444:	emc/kinematics/palletkins.c -o objects/rtemc/kinematics/palletkins.o
+4188:Linking ../rtlib/palletkins.so
+4189:ld -d -r -o objects/palletkins.tmp objects/rtemc/kinematics/palletkins.o
+4191:objdump -w -j .rtapi_export -t objects/palletkins.tmp \
+4193:> objects/palletkins.ver
+4195:gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/palletkins.ver -o ../rtlib/palletkins.so objects/rtemc/kinematics/palletkins.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/
+4209:chmod -x ../rtlib/palletkins.so
+# ---- tail 250 ----
+Linking ../rtlib/spindle.so
+ld -d -r -o objects/spindle.tmp objects/rtobjects/hal/components/spindle.o
+Linking ../rtlib/spindle_monitor.so
+ld -d -r -o objects/spindle_monitor.tmp objects/rtobjects/hal/components/spindle_monitor.o
+objdump -w -j .rtapi_export -t objects/sphereprobe.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/sphereprobe.ver
+objdump -w -j .rtapi_export -t objects/spindle.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/spindle.ver
+objdump -w -j .rtapi_export -t objects/spindle_monitor.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/spindle_monitor.ver
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/sphereprobe.ver -o ../rtlib/sphereprobe.so objects/rtobjects/hal/components/sphereprobe.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/spindle.ver -o ../rtlib/spindle.so objects/rtobjects/hal/components/spindle.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/spindle_monitor.ver -o ../rtlib/spindle_monitor.so objects/rtobjects/hal/components/spindle_monitor.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+chmod -x ../rtlib/simple_tp.so
+Linking ../rtlib/steptest.so
+ld -d -r -o objects/steptest.tmp objects/rtobjects/hal/components/steptest.o
+objdump -w -j .rtapi_export -t objects/steptest.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/steptest.ver
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/steptest.ver -o ../rtlib/steptest.so objects/rtobjects/hal/components/steptest.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+chmod -x ../rtlib/spindle_monitor.so
+chmod -x ../rtlib/spindle.so
+Linking ../rtlib/sum2.so
+ld -d -r -o objects/sum2.tmp objects/rtobjects/hal/components/sum2.o
+chmod -x ../rtlib/sphereprobe.so
+Linking ../rtlib/tap.so
+ld -d -r -o objects/tap.tmp objects/rtobjects/hal/components/tap.o
+objdump -w -j .rtapi_export -t objects/sum2.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/sum2.ver
+objdump -w -j .rtapi_export -t objects/tap.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/tap.ver
+Linking ../rtlib/thc.so
+ld -d -r -o objects/thc.tmp objects/rtobjects/hal/components/thc.o
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/sum2.ver -o ../rtlib/sum2.so objects/rtobjects/hal/components/sum2.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+objdump -w -j .rtapi_export -t objects/thc.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/thc.ver
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/tap.ver -o ../rtlib/tap.so objects/rtobjects/hal/components/tap.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+chmod -x ../rtlib/steptest.so
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/thc.ver -o ../rtlib/thc.so objects/rtobjects/hal/components/thc.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+Linking ../rtlib/thcud.so
+ld -d -r -o objects/thcud.tmp objects/rtobjects/hal/components/thcud.o
+objdump -w -j .rtapi_export -t objects/thcud.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/thcud.ver
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/thcud.ver -o ../rtlib/thcud.so objects/rtobjects/hal/components/thcud.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+chmod -x ../rtlib/sum2.so
+Linking ../rtlib/threadtest.so
+ld -d -r -o objects/threadtest.tmp objects/rtobjects/hal/components/threadtest.o
+chmod -x ../rtlib/tap.so
+chmod -x ../rtlib/thc.so
+objdump -w -j .rtapi_export -t objects/threadtest.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/threadtest.ver
+Linking ../rtlib/time.so
+ld -d -r -o objects/time.tmp objects/rtobjects/hal/components/time.o
+Linking ../rtlib/timedelay.so
+ld -d -r -o objects/timedelay.tmp objects/rtobjects/hal/components/timedelay.o
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/threadtest.ver -o ../rtlib/threadtest.so objects/rtobjects/hal/components/threadtest.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+objdump -w -j .rtapi_export -t objects/time.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/time.ver
+objdump -w -j .rtapi_export -t objects/timedelay.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/timedelay.ver
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/time.ver -o ../rtlib/time.so objects/rtobjects/hal/components/time.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/timedelay.ver -o ../rtlib/timedelay.so objects/rtobjects/hal/components/timedelay.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+chmod -x ../rtlib/thcud.so
+Linking ../rtlib/timedelta.so
+ld -d -r -o objects/timedelta.tmp objects/rtobjects/hal/components/timedelta.o
+objdump -w -j .rtapi_export -t objects/timedelta.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/timedelta.ver
+chmod -x ../rtlib/threadtest.so
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/timedelta.ver -o ../rtlib/timedelta.so objects/rtobjects/hal/components/timedelta.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+Linking ../rtlib/tof.so
+ld -d -r -o objects/tof.tmp objects/rtobjects/hal/components/tof.o
+chmod -x ../rtlib/time.so
+chmod -x ../rtlib/timedelay.so
+objdump -w -j .rtapi_export -t objects/tof.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/tof.ver
+Linking ../rtlib/toggle.so
+ld -d -r -o objects/toggle.tmp objects/rtobjects/hal/components/toggle.o
+Linking ../rtlib/toggle2nist.so
+ld -d -r -o objects/toggle2nist.tmp objects/rtobjects/hal/components/toggle2nist.o
+objdump -w -j .rtapi_export -t objects/toggle.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/toggle.ver
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/tof.ver -o ../rtlib/tof.so objects/rtobjects/hal/components/tof.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+objdump -w -j .rtapi_export -t objects/toggle2nist.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/toggle2nist.ver
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/toggle.ver -o ../rtlib/toggle.so objects/rtobjects/hal/components/toggle.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+chmod -x ../rtlib/timedelta.so
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/toggle2nist.ver -o ../rtlib/toggle2nist.so objects/rtobjects/hal/components/toggle2nist.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+Linking ../rtlib/ton.so
+ld -d -r -o objects/ton.tmp objects/rtobjects/hal/components/ton.o
+objdump -w -j .rtapi_export -t objects/ton.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/ton.ver
+chmod -x ../rtlib/tof.so
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/ton.ver -o ../rtlib/ton.so objects/rtobjects/hal/components/ton.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+Linking ../rtlib/tp.so
+ld -d -r -o objects/tp.tmp objects/rtobjects/hal/components/tp.o
+chmod -x ../rtlib/toggle2nist.so
+objdump -w -j .rtapi_export -t objects/tp.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/tp.ver
+Linking ../rtlib/trigwin.so
+ld -d -r -o objects/trigwin.tmp objects/rtobjects/hal/components/trigwin.o
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/tp.ver -o ../rtlib/tp.so objects/rtobjects/hal/components/tp.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+chmod -x ../rtlib/toggle.so
+objdump -w -j .rtapi_export -t objects/trigwin.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/trigwin.ver
+Linking ../rtlib/tristate_bit.so
+ld -d -r -o objects/tristate_bit.tmp objects/rtobjects/hal/components/tristate_bit.o
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/trigwin.ver -o ../rtlib/trigwin.so objects/rtobjects/hal/components/trigwin.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+chmod -x ../rtlib/ton.so
+objdump -w -j .rtapi_export -t objects/tristate_bit.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/tristate_bit.ver
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/tristate_bit.ver -o ../rtlib/tristate_bit.so objects/rtobjects/hal/components/tristate_bit.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+Linking ../rtlib/tristate_float.so
+ld -d -r -o objects/tristate_float.tmp objects/rtobjects/hal/components/tristate_float.o
+objdump -w -j .rtapi_export -t objects/tristate_float.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/tristate_float.ver
+chmod -x ../rtlib/tp.so
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/tristate_float.ver -o ../rtlib/tristate_float.so objects/rtobjects/hal/components/tristate_float.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+Linking ../rtlib/updown.so
+ld -d -r -o objects/updown.tmp objects/rtobjects/hal/components/updown.o
+chmod -x ../rtlib/trigwin.so
+objdump -w -j .rtapi_export -t objects/updown.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/updown.ver
+Linking ../rtlib/userkins.so
+ld -d -r -o objects/userkins.tmp objects/rtobjects/hal/components/userkins.o
+chmod -x ../rtlib/tristate_bit.so
+objdump -w -j .rtapi_export -t objects/userkins.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/userkins.ver
+Linking ../rtlib/wcomp.so
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/updown.ver -o ../rtlib/updown.so objects/rtobjects/hal/components/updown.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+ld -d -r -o objects/wcomp.tmp objects/rtobjects/hal/components/wcomp.o
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/userkins.ver -o ../rtlib/userkins.so objects/rtobjects/hal/components/userkins.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+objdump -w -j .rtapi_export -t objects/wcomp.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/wcomp.ver
+chmod -x ../rtlib/tristate_float.so
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/wcomp.ver -o ../rtlib/wcomp.so objects/rtobjects/hal/components/wcomp.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+Linking ../rtlib/xhc_hb04_util.so
+ld -d -r -o objects/xhc_hb04_util.tmp objects/rtobjects/hal/components/xhc_hb04_util.o
+objdump -w -j .rtapi_export -t objects/xhc_hb04_util.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/xhc_hb04_util.ver
+chmod -x ../rtlib/updown.so
+chmod -x ../rtlib/userkins.so
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/xhc_hb04_util.ver -o ../rtlib/xhc_hb04_util.so objects/rtobjects/hal/components/xhc_hb04_util.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+Linking ../rtlib/xor2.so
+ld -d -r -o objects/xor2.tmp objects/rtobjects/hal/components/xor2.o
+Linking ../rtlib/xyzab_tdr_kins.so
+ld -d -r -o objects/xyzab_tdr_kins.tmp objects/rtobjects/hal/components/xyzab_tdr_kins.o
+objdump -w -j .rtapi_export -t objects/xor2.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/xor2.ver
+objdump -w -j .rtapi_export -t objects/xyzab_tdr_kins.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/xyzab_tdr_kins.ver
+chmod -x ../rtlib/wcomp.so
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/xyzab_tdr_kins.ver -o ../rtlib/xyzab_tdr_kins.so objects/rtobjects/hal/components/xyzab_tdr_kins.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/xor2.ver -o ../rtlib/xor2.so objects/rtobjects/hal/components/xor2.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+Linking ../rtlib/xyzacb_trsrn.so
+ld -d -r -o objects/xyzacb_trsrn.tmp objects/rtobjects/hal/components/xyzacb_trsrn.o
+objdump -w -j .rtapi_export -t objects/xyzacb_trsrn.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/xyzacb_trsrn.ver
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/xyzacb_trsrn.ver -o ../rtlib/xyzacb_trsrn.so objects/rtobjects/hal/components/xyzacb_trsrn.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+chmod -x ../rtlib/xhc_hb04_util.so
+chmod -x ../rtlib/xor2.so
+Linking ../rtlib/xyzbca_trsrn.so
+ld -d -r -o objects/xyzbca_trsrn.tmp objects/rtobjects/hal/components/xyzbca_trsrn.o
+chmod -x ../rtlib/xyzab_tdr_kins.so
+Linking ../rtlib/serport.so
+ld -d -r -o objects/serport.tmp objects/rtobjects/hal/drivers/serport.o
+objdump -w -j .rtapi_export -t objects/xyzbca_trsrn.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/xyzbca_trsrn.ver
+objdump -w -j .rtapi_export -t objects/serport.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/serport.ver
+Linking ../rtlib/mesa_7i65.so
+ld -d -r -o objects/mesa_7i65.tmp objects/rtobjects/hal/drivers/mesa_7i65.o
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/serport.ver -o ../rtlib/serport.so objects/rtobjects/hal/drivers/serport.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/xyzbca_trsrn.ver -o ../rtlib/xyzbca_trsrn.so objects/rtobjects/hal/components/xyzbca_trsrn.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+objdump -w -j .rtapi_export -t objects/mesa_7i65.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/mesa_7i65.ver
+chmod -x ../rtlib/xyzacb_trsrn.so
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/mesa_7i65.ver -o ../rtlib/mesa_7i65.so objects/rtobjects/hal/drivers/mesa_7i65.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+Linking ../rtlib/mesa_uart.so
+ld -d -r -o objects/mesa_uart.tmp objects/rtobjects/hal/drivers/mesa_uart.o
+objdump -w -j .rtapi_export -t objects/mesa_uart.tmp \
+| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($6,16))} END{print "local : * ; };"}' \
+> objects/mesa_uart.ver
+chmod -x ../rtlib/xyzbca_trsrn.so
+gcc -shared -Wl,-Bsymbolic -Wl,--version-script,objects/mesa_uart.ver -o ../rtlib/mesa_uart.so objects/rtobjects/hal/drivers/mesa_uart.o -lm  -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc  
+Compiling objects/hal/user_comps/thermistor.c
+chmod -x ../rtlib/serport.so
+chmod -x ../rtlib/mesa_7i65.so
+Compiling hal/user_comps/wj200_vfd/wj200_vfd.c
+Compiling hal/user_comps/pi500_vfd/pi500_vfd.c
+gcc -c -I. -Iemc -I/home/user/wt/b210/src/include -I../include -I/usr/include/python3.13 -I/usr/include/tirpc  -O2 -fwrapv  -g -Wall -D_FORTIFY_SOURCE=2 -DULAPI -std=gnu11 -Werror=implicit-function-declaration -g -O2 -I/usr/include/tirpc  -Wextra    \
+	-MP -MD -MF "objects/objects/hal/user_comps/thermistor.d" -MT "objects/objects/hal/user_comps/thermistor.o" \
+	objects/hal/user_comps/thermistor.c -o objects/objects/hal/user_comps/thermistor.o
+gcc -c -I. -Iemc -I/home/user/wt/b210/src/include -I../include -I/usr/include/python3.13 -I/usr/include/tirpc  -O2 -fwrapv  -g -Wall -D_FORTIFY_SOURCE=2 -DULAPI -std=gnu11 -Werror=implicit-function-declaration -g -O2 -I/usr/include/tirpc  -Wextra   -DDEBUG -I/usr/include/modbus  \
+	-MP -MD -MF "objects/hal/user_comps/wj200_vfd/wj200_vfd.d" -MT "objects/hal/user_comps/wj200_vfd/wj200_vfd.o" \
+	hal/user_comps/wj200_vfd/wj200_vfd.c -o objects/hal/user_comps/wj200_vfd/wj200_vfd.o
+gcc -c -I. -Iemc -I/home/user/wt/b210/src/include -I../include -I/usr/include/python3.13 -I/usr/include/tirpc  -O2 -fwrapv  -g -Wall -D_FORTIFY_SOURCE=2 -DULAPI -std=gnu11 -Werror=implicit-function-declaration -g -O2 -I/usr/include/tirpc  -Wextra   -DDEBUG -I/usr/include/modbus  \
+	-MP -MD -MF "objects/hal/user_comps/pi500_vfd/pi500_vfd.d" -MT "objects/hal/user_comps/pi500_vfd/pi500_vfd.o" \
+	hal/user_comps/pi500_vfd/pi500_vfd.c -o objects/hal/user_comps/pi500_vfd/pi500_vfd.o
+chmod -x ../rtlib/mesa_uart.so
+Linking librs274.so.0
+c++ -std=gnu++20 -g -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc   -Xlinker -export-dynamic -Wl,-O1 -Wl,-Bsymbolic-functions -Wl,-soname,librs274.so.0 -shared -o ../lib/librs274.so.0 objects/emc/rs274ngc/interp_arc.o objects/emc/rs274ngc/interp_array.o objects/emc/rs274ngc/interp_base.o objects/emc/rs274ngc/interp_check.o objects/emc/rs274ngc/interp_convert.o objects/emc/rs27
+Linking thermistor
+gcc -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc   -o ../bin/thermistor objects/objects/hal/user_comps/thermistor.o ../lib/liblinuxcnchal.so -lm -lstdc++
+Linking wj200_vfd
+gcc -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc   -o ../bin/wj200_vfd objects/hal/user_comps/wj200_vfd/wj200_vfd.o ../lib/liblinuxcnchal.so.0 -lmodbus  
+Linking pi500_vfd
+gcc -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc   -o ../bin/pi500_vfd objects/hal/user_comps/pi500_vfd/pi500_vfd.o ../lib/liblinuxcnchal.so.0 -lmodbus  
+ln -sf librs274.so.0 ../lib/librs274.so
+Linking milltask
+c++ -std=gnu++20 -o ../bin/milltask objects/emc/motion/emcmotglb.o objects/emc/task/emctask.o objects/emc/task/emccanon.o objects/emc/task/emctaskmain.o objects/emc/motion/usrmotintf.o objects/emc/motion/emcmotutil.o objects/emc/task/taskintf.o objects/emc/motion/dbuf.o objects/emc/motion/stashf.o objects/emc/task/taskclass.o objects/emc/task/backtrace.o objects/emc/usr_intf/mapini.o ../lib/librs2
+Linking python module gcode.so
+Linking rs274
+c++ -std=gnu++20 -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc   -shared -o ../lib/python/gcode.so objects/emc/rs274ngc/gcodemodule.o objects/emc/rs274ngc/gcode_renderer.o objects/emc/rs274ngc/time_estimate.o ../lib/librs274.so.0 -lstdc++
+c++ -std=gnu++20 -Xlinker -export-dynamic -Wl,-O1 -Wl,-Bsymbolic-functions -o ../bin/rs274 objects/emc/sai/saicanon.o objects/emc/sai/driver.o objects/emc/sai/dummyemcstat.o objects/emc/task/taskclass.o ../lib/librs274.so.0 ../lib/liblinuxcnc.a ../lib/libnml.so.0 ../lib/liblinuxcnchal.so.0 ../lib/liblinuxcncini.so.1 ../lib/libpyplugin.so.0 ../lib/libtooldata.so.0 -Wall -g -I. -I/home/user/wt/b210/
+Linking canterp.so
+mkdir -p ../lib/linuxcnc
+rm -f ../lib/linuxcnc/canterp.so
+c++ -std=gnu++20 -L/home/user/wt/b210/lib -Wl,-rpath,/home/user/wt/b210/lib -ltirpc   -Wl,-soname,canterp.so -shared -o ../lib/linuxcnc/canterp.so objects/emc/canterp/canterp.o ../lib/liblinuxcncini.so.1 ../lib/librs274.so 
+You now need to run 'sudo make setuid' or 'sudo make setcap' in order to run in place with access to hardware.
+make: Leaving directory '/home/user/wt/b210/src'
+make_exit=0
