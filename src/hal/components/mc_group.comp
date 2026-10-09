@@ -30,7 +30,9 @@ done-id / aborted-id / failed-id): *execute* = a move to position-x..c
 positions, 4..5 must be 0; 1 MCS: through the inverse kinematics, A and B must
 be 0 - the flange is kept level; 2 PCS: refused, no part frame yet) with *mode*
 0 MC_MoveDirectAbsolute or 1 MC_MoveLinearAbsolute (MCS only) and
-*buffer-mode* 0 mcAborting / 1 mcBuffered (one move queued; a Linear move
+*buffer-mode* 0 mcAborting / 1 mcBuffered (one move queued; 2..5 blending
+is not implemented: such a move runs buffered - it stops exactly at the
+corner, the programmed path itself; a Linear move
 aborts nothing and is not aborted by a move: refused 2 while the group moves,
 halt it or buffer it); *halt* =
 MC_GroupHalt (every member halts; Done when all stand); *reset* = MC_GroupReset
@@ -47,8 +49,8 @@ deceleration and jerk (Part 4: it runs at the mechanism's limits).
 
 LINEAR MOVE: the flange point on a straight line (C interpolated with it;
 a pure turn of C runs on C, velocity then in deg/s) with a trapezoid of
-*velocity*, *acceleration*, *deceleration* (0 = acceleration; jerk must be
-0).  The members are put into SynchronizedMotion (member-sync ->
+*velocity*, *acceleration* (0 = the mechanism's: the least maxa_i/|dq_i/ds|
+along the path), *deceleration* (0 = acceleration; jerk must be 0).  The members are put into SynchronizedMotion (member-sync ->
 mc_axis.N.sync-enable) and given the inverse kinematics of the path every
 period (joint-sync-N -> mc_axis.N.sync-pos).  Where the path asks a member
 for more than its maxv the path slows down for that period (velocity
@@ -65,7 +67,7 @@ STATE CODES (pin *state*, Part 4 group diagram): 0 GroupDisabled,
 the members' states and the group's own command: no second machine.
 
 ERROR IDS (pin *error-id*: newest outcome; *group-error-id*: why the group is
-in ErrorStop): 1 buffer mode not implemented (blending), 2 command not allowed
+in ErrorStop): 2 command not allowed
 in this state, 5 member target outside its soft limits, 7 invalid geometry or
 member limits, 8 unknown or not implemented mode, 10 target unreachable (no
 inverse solution), 11 A/B not 0 (MCS) or elements 4..5 not 0 (ACS),
@@ -92,7 +94,7 @@ pin in bool halt "rising edge: MC_GroupHalt";
 pin in bool reset "rising edge: MC_GroupReset";
 pin in sint mode "0 MoveDirectAbsolute, 1 MoveLinearAbsolute";
 pin in sint coord "MC_COORD_SYSTEM: 0 ACS, 1 MCS, 2 PCS";
-pin in sint buffer_mode "MC_BUFFER_MODE: 0 mcAborting, 1 mcBuffered, 2..5 blending (refused)";
+pin in sint buffer_mode "MC_BUFFER_MODE: 0 mcAborting, 1 mcBuffered, 2..5 blending (run buffered)";
 pin in real velocity "Linear move: path velocity, mm/s";
 pin in real acceleration "Linear move: path acceleration, mm/s^2";
 pin in real deceleration "Linear move: path deceleration, mm/s^2";
@@ -133,6 +135,7 @@ pin out bool error;
 pin out sint error_id "outcome of the newest command: refusal code, else the ErrorStop reason";
 pin out sint group_error_id "MC_GroupReadError: why the group is in ErrorStop, 0 outside it";
 pin out uint command_id;
+pin out uint active_id "number of the command the group executes now (a buffered one waits), 0 none";
 pin out uint done_id;
 pin out uint aborted_id;
 pin out uint failed_id;
@@ -202,7 +205,6 @@ function _;
 #pragma pop_macro("rtapi_app_exit")
 #pragma pop_macro("rtapi_app_main")
 
-#define E_BUFFER_MODE_NOT_IMPLEMENTED 1
 #define E_COMMAND_NOT_ALLOWED_IN_STATE 2
 #define E_SOFT_LIMIT 5
 #define E_INVALID_PARAMETERS 7
@@ -242,11 +244,10 @@ static int resolve(struct __comp_state *__comp_inst, const double *seed, double 
     KINEMATICS_INVERSE_FLAGS fi = 0;
     int i;
     if (buffer_mode < 0 || buffer_mode > 5) return E_UNKNOWN_MODE;
-    if (buffer_mode > 1) return E_BUFFER_MODE_NOT_IMPLEMENTED;
     if (mode != 0 && mode != 1) return E_UNKNOWN_MODE;
     if (mode == 1) {
         if (coord != 1) return E_COORD_SYSTEM;
-        if (!(velocity > 0.0 && acceleration > 0.0 && deceleration >= 0.0 && jerk == 0.0)) return E_INVALID_PARAMETERS;
+        if (!(velocity > 0.0 && acceleration >= 0.0 && deceleration >= 0.0 && jerk == 0.0)) return E_INVALID_PARAMETERS;
     }
     if (coord == 0) {
         if (position_b != 0.0 || position_c != 0.0) return E_ORIENTATION;
@@ -317,6 +318,26 @@ static int path_ik(struct __comp_state *__comp_inst, double f, double *out) {
     return 0;
 }
 
+/* The mechanism's path acceleration (acceleration 0 = the mechanism's ceiling, as mc_axis's 0 = maxa): the least
+ * maxa_i / |dq_i/ds| over PATH_SAMPLES pieces of the path; -1 if a piece has no inverse solution. */
+static void to_errorstop(struct __comp_state *__comp_inst, int id);
+#define PATH_SAMPLES 64   /* ПРЕДПОЛОЖЕНИЕ, не замер: 64 pieces resolve |dq/ds| of a 4R arm along one line */
+static double mech_acc(struct __comp_state *__comp_inst) {
+    double best = 1e300, keep[4], qa[4], qb[4], h = 1.0 / PATH_SAMPLES, dqds;
+    int n, i;
+    for (i = 0; i < 4; i++) keep[i] = qa[i] = qc[i];
+    for (n = 0; n < PATH_SAMPLES && l_len > 0.0; n++) {
+        if (path_ik(__comp_inst, (n + 1) * h, qb)) { best = -1.0; break; }
+        for (i = 0; i < 4; i++) {
+            dqds = fabs(qb[i] - qa[i]) / (h * l_len);
+            if (dqds > 0.0 && joint_maxa(i) / dqds < best) best = joint_maxa(i) / dqds;
+            qa[i] = qc[i] = qb[i];
+        }
+    }
+    for (i = 0; i < 4; i++) qc[i] = keep[i];
+    return best;
+}
+
 /* Linear move from the members' actual positions to p1 (X Y Z C): the members enter SynchronizedMotion first. */
 static void start_linear(struct __comp_state *__comp_inst, const double *p1, double v, double a, double d, int id) {
     struct geom gi;
@@ -332,10 +353,16 @@ static void start_linear(struct __comp_state *__comp_inst, const double *p1, dou
     dx = lp1[0] - lp0[0]; dy = lp1[1] - lp0[1]; dz = lp1[2] - lp0[2];
     l_len = sqrt(dx * dx + dy * dy + dz * dz);
     if (l_len == 0.0) l_len = fabs(lp1[3] - lp0[3]);
-    l_s = 0.0; l_v = 0.0; l_vmax = v; l_acc = a; l_dec = d > 0.0 ? d : a;
+    l_s = 0.0; l_v = 0.0; l_vmax = v;
+    run = RUN_LIN; run_id = id;
+    if (a <= 0.0 || d <= 0.0) {
+        double m = mech_acc(__comp_inst);
+        if (m < 0.0) { to_errorstop(__comp_inst, E_UNREACHABLE); return; }
+        if (a <= 0.0) a = m;
+    }
+    l_acc = a; l_dec = d > 0.0 ? d : a;
     lin = 1; lin_wait = 0; lin_halt = 0;
     member_sync_set(1);
-    run = RUN_LIN; run_id = id;
     if (id == (int)command_id) active_set(1);
 }
 
@@ -485,7 +512,7 @@ FUNCTION(_) {
     /* this period's command */
     if (ex_edge) {
         if (state == GS_DISABLED || state == GS_ERROR_STOP || run == RUN_HALT) cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;
-        else if (state == GS_MOVING && buffer_mode == 1) {
+        else if (state == GS_MOVING && buffer_mode >= 1) {   /* buffered; blending runs buffered (exact stop) */
             if (q_valid) cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;
             else if ((e = resolve(__comp_inst, tj, t))) cmd_err = e;
             else {
@@ -533,6 +560,7 @@ FUNCTION(_) {
     if (cmd_err && (ex_edge || halt_edge || reset_edge)) failed_id_set(seq);
 
     group_error_id_set(state == GS_ERROR_STOP ? grp_err : 0);
+    active_id_set(run ? run_id : 0);
     error_set(cmd_err != 0 || (state == GS_ERROR_STOP && !busy && !done));
     error_id_set(cmd_err ? cmd_err : state == GS_ERROR_STOP ? grp_err : 0);
 
