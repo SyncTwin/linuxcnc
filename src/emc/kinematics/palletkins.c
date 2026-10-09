@@ -6,9 +6,14 @@
  *   r = SX - U*sin(q2) + F*cos(q2+q3) + FX
  *   h = SZ + U*cos(q2) + F*sin(q2+q3) + FZ
  *   X = r*cos(q1) - FY*sin(q1),  Y = r*sin(q1) + FY*cos(q1),  Z = h
- * Inverse is closed form (planar two-link); the elbow branch nearest to the
- * current joints wins. Geometry is NOT baked in: HAL pins palletkins.* are set
- * by the generated .hal from the machine's URDF.
+ * Inverse is closed form (planar two-link) with four branches; the branch is
+ * chosen by the inverse flags, as pumakins (PUMA_SHOULDER_RIGHT, PUMA_ELBOW_DOWN)
+ * and scarakins do: kinematicsForward reports the configuration of the joints
+ * in *iflags, kinematicsInverse solves in the configuration *iflags names
+ * (motion keeps one iflags: control.c sets it by the forward kinematics and
+ * hands it to the inverse).  Picking among branches (joint limits, nearest) is
+ * the caller's.  Geometry is NOT baked in: HAL pins palletkins.* are set by the
+ * generated .hal from the machine's URDF.
  *
  * Built in-tree (src/Makefile, obj-m like scarakins).
  */
@@ -37,13 +42,16 @@ struct geom {
 };
 static struct geom *g;
 
+/* Inverse flags (iflags): 0 = the flange in front of the base axis, elbow up. */
+#define PALLET_SHOULDER_BACK 0x01   /* r < 0: the flange behind the base axis (shoulder leaned back) */
+#define PALLET_ELBOW_DOWN    0x02   /* the forearm turned past the upper arm: sin(q3 - 90 deg) > 0 */
+
 #define D2R (M_PI/180.0)
 #define R2D (180.0/M_PI)
 
 int kinematicsForward(const double *joint, EmcPose *pos,
         const KINEMATICS_FORWARD_FLAGS *fflags, KINEMATICS_INVERSE_FLAGS *iflags) {
     (void)fflags;
-    (void)iflags;
     double q1 = joint[0] * D2R, q2 = joint[1] * D2R, q3 = joint[2] * D2R;
     double sx = GEOM_GET(g->sx), sz = GEOM_GET(g->sz), u = GEOM_GET(g->u), f = GEOM_GET(g->f);
     double fx = GEOM_GET(g->fx), fy = GEOM_GET(g->fy), fz = GEOM_GET(g->fz);
@@ -55,44 +63,38 @@ int kinematicsForward(const double *joint, EmcPose *pos,
     pos->a = 0.0; pos->b = 0.0;
     pos->c = joint[0] + joint[3];
     pos->u = pos->v = pos->w = 0.0;
+    if (iflags) {   /* NULL from a caller that only wants the pose */
+        *iflags = 0;
+        if (r < 0.0) *iflags |= PALLET_SHOULDER_BACK;
+        if (cos(q3) < 0.0) *iflags |= PALLET_ELBOW_DOWN;   /* sin(q3 - 90 deg) = -cos(q3) */
+    }
     return 0;
 }
 
 int kinematicsInverse(const EmcPose *pos, double *joint,
         const KINEMATICS_INVERSE_FLAGS *iflags, KINEMATICS_FORWARD_FLAGS *fflags) {
-    (void)iflags;
     (void)fflags;
+    KINEMATICS_INVERSE_FLAGS fl = iflags ? *iflags : 0;
     double x = pos->tran.x, y = pos->tran.y, fy = GEOM_GET(g->fy);
     double U = GEOM_GET(g->u), F = GEOM_GET(g->f);
     double rho2 = x * x + y * y;
-    if (rho2 < fy * fy) return -1;
-    double best[3] = {0.0, 0.0, 0.0}, best_d = 1e99;
-    int sr, s;
-    /* The flange may sit in front of the base axis (r > 0) or behind it
-     * (r < 0, shoulder leaned back): both carousel solutions are tried. */
-    for (sr = -1; sr <= 1; sr += 2) {
-        double r = sr * sqrt(rho2 - fy * fy);
-        double q1 = (atan2(y, x) - atan2(fy, r)) * R2D;
-        while (q1 > 180.0) q1 -= 360.0;
-        while (q1 < -180.0) q1 += 360.0;
-        double a = r - GEOM_GET(g->sx) - GEOM_GET(g->fx);
-        double b = pos->tran.z - GEOM_GET(g->sz) - GEOM_GET(g->fz);
-        double D = (a * a + b * b - U * U - F * F) / (2.0 * U * F);
-        if (D > 1.0 || D < -1.0 || U <= 0.0 || F <= 0.0) continue;
-        for (s = -1; s <= 1; s += 2) {
-            double t2 = s * acos(D);                   /* forearm vs upper arm */
-            double t1 = atan2(b, a) - atan2(F * sin(t2), U + F * cos(t2));
-            double q2 = (t1 * R2D) - 90.0, q3 = (t2 * R2D) + 90.0;
-            while (q2 > 180.0) q2 -= 360.0;
-            while (q2 < -180.0) q2 += 360.0;
-            double d = fabs(q1 - joint[0]) + fabs(q2 - joint[1]) + fabs(q3 - joint[2]);
-            if (d < best_d) { best_d = d; best[0] = q1; best[1] = q2; best[2] = q3; }
-        }
-    }
-    if (best_d > 1e98) return -1;
-    joint[0] = best[0];
-    joint[1] = best[1];
-    joint[2] = best[2];
+    if (rho2 < fy * fy || U <= 0.0 || F <= 0.0) return -1;
+    double r = ((fl & PALLET_SHOULDER_BACK) ? -1.0 : 1.0) * sqrt(rho2 - fy * fy);
+    double q1 = (atan2(y, x) - atan2(fy, r)) * R2D;
+    while (q1 > 180.0) q1 -= 360.0;
+    while (q1 < -180.0) q1 += 360.0;
+    double a = r - GEOM_GET(g->sx) - GEOM_GET(g->fx);
+    double b = pos->tran.z - GEOM_GET(g->sz) - GEOM_GET(g->fz);
+    double D = (a * a + b * b - U * U - F * F) / (2.0 * U * F);
+    if (D > 1.0 || D < -1.0) return -1;
+    double t2 = ((fl & PALLET_ELBOW_DOWN) ? 1.0 : -1.0) * acos(D);   /* forearm vs upper arm */
+    double t1 = atan2(b, a) - atan2(F * sin(t2), U + F * cos(t2));
+    double q2 = (t1 * R2D) - 90.0, q3 = (t2 * R2D) + 90.0;
+    while (q2 > 180.0) q2 -= 360.0;
+    while (q2 < -180.0) q2 += 360.0;
+    joint[0] = q1;
+    joint[1] = q2;
+    joint[2] = q3;
     joint[3] = pos->c - joint[0];
     return 0;
 }

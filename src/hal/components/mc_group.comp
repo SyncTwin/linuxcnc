@@ -30,7 +30,11 @@ COMMANDS (rising edges, numbered on command-id like mc_axis; resolved on
 done-id / aborted-id / failed-id): *execute* = a move to position-x..c
 (MC_POSITION X Y Z A B C) in *coord* (0 ACS: the elements 0..3 are the member
 positions, 4..5 must be 0; 1 MCS: through the inverse kinematics, A and B must
-be 0 - the flange is kept level; 2 PCS: refused, no part frame yet) with *mode*
+be 0 - the flange is kept level; of the four configurations of palletkins
+(inverse flags: shoulder front/back, elbow up/down) a Direct move takes the one
+nearest to the move's start among those within the members' soft limits, a
+Linear move stays in the configuration it starts in; none reachable is 10,
+reachable only outside the limits is 5; 2 PCS: refused, no part frame yet) with *mode*
 0 MC_MoveDirectAbsolute or 1 MC_MoveLinearAbsolute (MCS only) and
 *buffer-mode* 0 mcAborting / 1 mcBuffered (one move queued; 2..5 blending
 is not implemented: such a move runs buffered - it stops exactly at the
@@ -182,6 +186,7 @@ variable double l_dec;
 variable double qc[4];     // member positions given this period
 variable int q_id;
 variable double q_tj[4];
+variable int l_flags;      // linear: the palletkins configuration (inverse flags) the path keeps
 
 function _;
 ;;
@@ -245,41 +250,55 @@ static void use_geometry(struct __comp_state *__comp_inst, struct geom *gi) {
     g = gi;
 }
 
-/* The move's member targets into out[4], seeded by seed[4] (the branch nearest to it); 0 or a refusal code. */
+/* The move's member targets into out[4] from the start seed[4]; 0 or a refusal code.  MCS: every palletkins
+ * configuration (inverse flags) is solved, the nearest to seed within the members' soft limits wins (Direct); a
+ * Linear move keeps the configuration of seed (its path cannot change it). */
 static int resolve(struct __comp_state *__comp_inst, const double *seed, double *out) {
     struct geom gi;
-    double jt[EMCMOT_MAX_JOINTS] = {0};
+    double jt[EMCMOT_MAX_JOINTS] = {0}, d, best_d = 1e300;
     EmcPose p = {{0, 0, 0}, 0, 0, 0, 0, 0, 0};
     KINEMATICS_FORWARD_FLAGS ff = 0;
-    KINEMATICS_INVERSE_FLAGS fi = 0;
-    int i;
+    KINEMATICS_INVERSE_FLAGS fi = 0, fl, fl_start = 0;
+    int i, ok, e;
     if (buffer_mode < 0 || buffer_mode > 5) return E_UNKNOWN_MODE;
     if (mode != 0 && mode != 1) return E_UNKNOWN_MODE;
     if (mode == 1) {
         if (coord != 1) return E_COORD_SYSTEM;
         if (!(velocity > 0.0 && acceleration >= 0.0 && deceleration >= 0.0 && jerk == 0.0)) return E_INVALID_PARAMETERS;
     }
+    for (i = 0; i < 4; i++)
+        if (!(joint_maxv(i) > 0.0 && joint_maxa(i) > 0.0 && joint_max(i) > joint_min(i))) return E_INVALID_PARAMETERS;
     if (coord == 0) {
         if (position_b != 0.0 || position_c != 0.0) return E_ORIENTATION;
         out[0] = position_x; out[1] = position_y; out[2] = position_z; out[3] = position_a;
-    } else if (coord == 1) {
-        if (!(upper > 0.0 && fore > 0.0)) return E_INVALID_PARAMETERS;
-        if (position_a != 0.0 || position_b != 0.0) return E_ORIENTATION;
+        for (i = 0; i < 4; i++) if (out[i] < joint_min(i) || out[i] > joint_max(i)) return E_SOFT_LIMIT;
+        return 0;
+    }
+    if (coord == 2) return E_COORD_SYSTEM;
+    if (coord != 1) return E_UNKNOWN_MODE;
+    if (!(upper > 0.0 && fore > 0.0)) return E_INVALID_PARAMETERS;
+    if (position_a != 0.0 || position_b != 0.0) return E_ORIENTATION;
+    p.tran.x = position_x; p.tran.y = position_y; p.tran.z = position_z; p.c = position_c;
+    use_geometry(__comp_inst, &gi);
+    if (mode == 1) {   /* the configuration of the start: the forward kinematics reports it */
+        EmcPose ps;
         for (i = 0; i < 4; i++) jt[i] = seed[i];
-        p.tran.x = position_x; p.tran.y = position_y; p.tran.z = position_z; p.c = position_c;
-        use_geometry(__comp_inst, &gi);
-        if (kinematicsInverse(&p, jt, &fi, &ff) != 0) return E_UNREACHABLE;
-        for (i = 0; i < 4; i++) out[i] = jt[i];
-    } else if (coord == 2) {
-        return E_COORD_SYSTEM;
-    } else {
-        return E_UNKNOWN_MODE;
+        kinematicsForward(jt, &ps, &ff, &fl_start);
     }
-    for (i = 0; i < 4; i++) {
-        if (!(joint_maxv(i) > 0.0 && joint_maxa(i) > 0.0 && joint_max(i) > joint_min(i))) return E_INVALID_PARAMETERS;
-        if (out[i] < joint_min(i) || out[i] > joint_max(i)) return E_SOFT_LIMIT;
+    e = E_UNREACHABLE;
+    for (fl = 0; fl < 4; fl++) {
+        if (mode == 1 && fl != fl_start) continue;
+        fi = fl;
+        for (i = 0; i < 4; i++) jt[i] = seed[i];
+        if (kinematicsInverse(&p, jt, &fi, &ff) != 0) continue;
+        e = E_SOFT_LIMIT;
+        for (ok = 1, d = 0.0, i = 0; i < 4; i++) {
+            if (jt[i] < joint_min(i) || jt[i] > joint_max(i)) ok = 0;
+            d += fabs(jt[i] - seed[i]);
+        }
+        if (ok && d < best_d) { best_d = d; for (i = 0; i < 4; i++) out[i] = jt[i]; }
     }
-    return 0;
+    return best_d < 1e300 ? 0 : e;
 }
 
 /* Synchronized Direct move to t[4] from the actual member positions: one normalized trapezoid for all. */
@@ -311,13 +330,13 @@ static void issue_members(struct __comp_state *__comp_inst, int what, int id, in
     for (i = 0; i < 4; i++) inv[i] = !only_errorstop || joint_state(i) == AX_ERROR_STOP;
 }
 
-/* Members at path fraction f (0..1) of the running Linear move, seeded by qc; 0 or -1 (no inverse solution). */
+/* Members at path fraction f (0..1) of the running Linear move, in its configuration l_flags; 0 or -1 (no solution). */
 static int path_ik(struct __comp_state *__comp_inst, double f, double *out) {
     struct geom gi;
     double jt[EMCMOT_MAX_JOINTS] = {0};
     EmcPose p = {{0, 0, 0}, 0, 0, 0, 0, 0, 0};
     KINEMATICS_FORWARD_FLAGS ff = 0;
-    KINEMATICS_INVERSE_FLAGS fi = 0;
+    KINEMATICS_INVERSE_FLAGS fi = l_flags;
     int i;
     for (i = 0; i < 4; i++) jt[i] = qc[i];
     p.tran.x = lp0[0] + (lp1[0] - lp0[0]) * f; p.tran.y = lp0[1] + (lp1[1] - lp0[1]) * f;
@@ -348,17 +367,19 @@ static double mech_acc(struct __comp_state *__comp_inst) {
     return best;
 }
 
-/* Linear move from the members' actual positions to p1 (X Y Z C): the members enter SynchronizedMotion first. */
-static void start_linear(struct __comp_state *__comp_inst, const double *p1, double v, double a, double d, int id) {
+/* Linear move from the members' actual positions to p1 (X Y Z C), member targets t (resolved): the members enter
+ * SynchronizedMotion first; t is the running move's end (tj), the start of a move buffered after it. */
+static void start_linear(struct __comp_state *__comp_inst, const double *p1, const double *t, double v, double a, double d, int id) {
     struct geom gi;
     double jf[EMCMOT_MAX_JOINTS] = {0}, dx, dy, dz;
     EmcPose p = {{0, 0, 0}, 0, 0, 0, 0, 0, 0};
     KINEMATICS_FORWARD_FLAGS ff = 0;
     KINEMATICS_INVERSE_FLAGS fi = 0;
     int i;
-    for (i = 0; i < 4; i++) { qc[i] = jf[i] = joint_fb(i); joint_sync_set(i, qc[i]); lp1[i] = p1[i]; }
+    for (i = 0; i < 4; i++) { qc[i] = jf[i] = joint_fb(i); joint_sync_set(i, qc[i]); lp1[i] = p1[i]; tj[i] = t[i]; }
     use_geometry(__comp_inst, &gi);
     kinematicsForward(jf, &p, &ff, &fi);
+    l_flags = fi;
     lp0[0] = p.tran.x; lp0[1] = p.tran.y; lp0[2] = p.tran.z; lp0[3] = p.c;
     dx = lp1[0] - lp0[0]; dy = lp1[1] - lp0[1]; dz = lp1[2] - lp0[2];
     l_len = sqrt(dx * dx + dy * dy + dz * dz);
@@ -402,7 +423,7 @@ static void next_from_queue(struct __comp_state *__comp_inst) {
     if (!q_valid) return;
     q_valid = 0;
     if (q_id == (int)command_id) busy_set(1);
-    if (q_mode == 1) start_linear(__comp_inst, q_p, q_v, q_a, q_d, q_id);
+    if (q_mode == 1) start_linear(__comp_inst, q_p, q_tj, q_v, q_a, q_d, q_id);
     else issue_move(__comp_inst, q_tj, q_id);
 }
 
@@ -541,7 +562,7 @@ FUNCTION(_) {
                 if (q_valid) { aborted_id_set(q_id); q_valid = 0; }
                 busy_set(1); state_set(GS_MOVING);
                 if (mode == 1) { double p1[4] = {position_x, position_y, position_z, position_c};
-                                 start_linear(__comp_inst, p1, velocity, acceleration, deceleration, seq); }
+                                 start_linear(__comp_inst, p1, t, velocity, acceleration, deceleration, seq); }
                 else issue_move(__comp_inst, t, seq);
             }
         }
