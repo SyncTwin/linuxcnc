@@ -187,19 +187,22 @@ function _;
 ;;
 
 /* palletkins.c compiled in: its module entry points, license line and exported
- * symbols stay inside this component (hidden; renamed so as not to clash with
- * halcompile's own).  Its `static struct geom *g` is pointed at this instance's
+ * symbols (EXPORT_SYMBOL, KINS_NOT_SWITCHABLE) stay inside this component
+ * (hidden; renamed so as not to clash with halcompile's own).  Its `static struct geom *g` is pointed at this instance's
  * geometry pins before every call (one thread: no other caller in between). */
 #include <rtapi_math.h>   /* before the hidden scope: libm's declarations keep default visibility */
 #pragma push_macro("rtapi_app_main")
 #pragma push_macro("rtapi_app_exit")
 #pragma push_macro("MODULE_LICENSE")
+#pragma push_macro("EXPORT_SYMBOL")
 #undef rtapi_app_main
 #undef rtapi_app_exit
 #undef MODULE_LICENSE
+#undef EXPORT_SYMBOL
 #define rtapi_app_main palletkins_app_main_unused
 #define rtapi_app_exit palletkins_app_exit_unused
 #define MODULE_LICENSE(s)
+#define EXPORT_SYMBOL(x)   /* a hidden export would leave the .ver line empty (Makefile awk takes column 6) */
 #pragma GCC visibility push(hidden)
 #if __has_include("emc/kinematics/palletkins.c")
 #include "emc/kinematics/palletkins.c"   /* in the tree: src/ is on the include path */
@@ -207,6 +210,7 @@ function _;
 #include "palletkins.c"                   /* halcompile: next to this file */
 #endif
 #pragma GCC visibility pop
+#pragma pop_macro("EXPORT_SYMBOL")
 #pragma pop_macro("MODULE_LICENSE")
 #pragma pop_macro("rtapi_app_exit")
 #pragma pop_macro("rtapi_app_main")
