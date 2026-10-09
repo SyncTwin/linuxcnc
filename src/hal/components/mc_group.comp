@@ -12,8 +12,10 @@ is compiled into the component from palletkins.c itself (no second copy of the
 formulas); the geometry is pins of the instance, the same seven numbers as the
 pins of the palletkins kinematics module, so one machine twin feeds both.
 One instance per group (the group number = the instance number).
-Built like any component of this tree; palletkins.c must sit next to this
-file or on the include path (halcompile: -I of the component's directory).
+Built like any component of this tree: palletkins.c is included by its path
+under src/ (src/ is on the include path of the tree's RT build).  Built alone
+with halcompile, palletkins.c sits next to this file (halcompile puts the
+component's directory on the include path).
 
 MEMBERS: four *mc_axis*(9) instances.  The group owns their motion inputs:
 joint-cmd-N -> mc_axis.N.position, joint-vel-N -> .velocity,
@@ -199,7 +201,11 @@ function _;
 #define rtapi_app_exit palletkins_app_exit_unused
 #define MODULE_LICENSE(s)
 #pragma GCC visibility push(hidden)
-#include "palletkins.c"
+#if __has_include("emc/kinematics/palletkins.c")
+#include "emc/kinematics/palletkins.c"   /* in the tree: src/ is on the include path */
+#else
+#include "palletkins.c"                   /* halcompile: next to this file */
+#endif
 #pragma GCC visibility pop
 #pragma pop_macro("MODULE_LICENSE")
 #pragma pop_macro("rtapi_app_exit")
