@@ -470,6 +470,17 @@ FUNCTION(_) {
     if (power && !stat_op_enabled && state != ST_DISABLED && state != ST_ERROR_STOP) {
         to_errorstop(__comp_inst, E_DRIVE_LEFT_OPERATION_ENABLED);
     }
+    /* MC_Power: Disabled -> Standstill once Enable and Status (P1 state
+     * diagram), BEFORE this period's commands are judged: a command whose edge
+     * comes with the power-on runs from Standstill, as after an MC_Power called
+     * first in the same scan.  Done here and not inside the Disabled case, where
+     * the transition used to clear the command's refusal - the command got a
+     * number and then no outcome (Busy for ever at the caller). */
+    if (state == ST_DISABLED && power && cfg && stat_op_enabled && !drv_fault) {
+        pos_cmd_set(pos_fb); v = 0.0; a_cur = 0.0; run = RUN_NONE;
+        state_set(ST_STANDSTILL);
+        if (cmd_err == E_INVALID_LIMITS_OR_PARAMETERS) cmd_err = 0;   /* the parameters are valid now */
+    }
 
     /* MC_SetPosition: Standstill only (P1 state diagram), refused elsewhere */
     if (set_edge && state != ST_STANDSTILL) cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;
@@ -480,10 +491,6 @@ FUNCTION(_) {
         pos_cmd_set(pos_fb); v = 0.0; a_cur = 0.0; run = RUN_NONE;
         if (!cfg && power) cmd_err = E_INVALID_LIMITS_OR_PARAMETERS;
         if (ex_edge || halt_edge || home_edge) cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;
-        if (power && cfg && stat_op_enabled && !drv_fault) {
-            state_set(ST_STANDSTILL);
-            cmd_err = 0;
-        }
         break;
 
     case ST_STANDSTILL:
