@@ -1,0 +1,546 @@
+component mc_group "PLCopen MC Part 4 axes group of a 4R palletizer: MC_MoveDirectAbsolute over mc_axis members through palletkins";
+author "SyncTwin";
+license "GPL";
+
+description
+"""
+An axes group (PLCopen Motion Control Part 4) of the 4R palletizer whose
+kinematics is *palletkins* (src/emc/kinematics/palletkins.c): members 0..3 =
+base turn, shoulder, elbow, flange turn (deg); the group's coordinates are
+X Y Z (flange point, mm, base frame) and C (flange turn, deg).  The kinematics
+is compiled into the component from palletkins.c itself (no second copy of the
+formulas); the geometry is pins of the instance, the same seven numbers as the
+pins of the palletkins kinematics module, so one machine twin feeds both.
+One instance per group (the group number = the instance number).
+Built like any component of this tree; palletkins.c must sit next to this
+file or on the include path (halcompile: -I of the component's directory).
+
+MEMBERS: four *mc_axis*(9) instances.  The group owns their motion inputs:
+joint-cmd-N -> mc_axis.N.position, joint-vel-N -> .velocity,
+joint-acc-N -> .acceleration, member-execute / member-halt / member-reset
+-> .execute / .halt / .reset of every member (one period pulses).  It reads
+.actual-position (joint-fb-N), .state, .command-id, .done-id, .aborted-id,
+.failed-id and the limits the axis is given (joint-maxv/maxa/min/max-N, the
+same signals as the axis's maxv/maxa/min-limit/max-limit).  MC_Power stays
+per axis: the group never powers a member.
+
+COMMANDS (rising edges, numbered on command-id like mc_axis; resolved on
+done-id / aborted-id / failed-id): *execute* = a move to position-x..c
+(MC_POSITION X Y Z A B C) in *coord* (0 ACS: the elements 0..3 are the member
+positions, 4..5 must be 0; 1 MCS: through the inverse kinematics, A and B must
+be 0 - the flange is kept level; 2 PCS: refused, no part frame yet) with *mode*
+0 MC_MoveDirectAbsolute or 1 MC_MoveLinearAbsolute (MCS only) and
+*buffer-mode* 0 mcAborting / 1 mcBuffered (one move queued; a Linear move
+aborts nothing and is not aborted by a move: refused 2 while the group moves,
+halt it or buffer it); *halt* =
+MC_GroupHalt (every member halts; Done when all stand); *reset* = MC_GroupReset
+(the members in ErrorStop get MC_Reset; Done when none is left).  *enable* is
+the level of MC_GroupEnable/MC_GroupDisable.
+
+DIRECT MOVE: joint interpolated, synchronized - every member runs the same
+normalized trapezoid s(t) in [0,1] with peak ds/dt = V = min maxv_i/|d_i| and
+d2s/dt2 = A = min maxa_i/|d_i| (d_i the member's distance), so member i gets
+velocity V*|d_i| and acceleration A*|d_i|, never over its own limits, and all
+start and stop together (from standstill; an aborting move from motion
+follows each member's own blend).  A Direct move ignores velocity, acceleration,
+deceleration and jerk (Part 4: it runs at the mechanism's limits).
+
+LINEAR MOVE: the flange point on a straight line (C interpolated with it;
+a pure turn of C runs on C, velocity then in deg/s) with a trapezoid of
+*velocity*, *acceleration*, *deceleration* (0 = acceleration; jerk must be
+0).  The members are put into SynchronizedMotion (member-sync ->
+mc_axis.N.sync-enable) and given the inverse kinematics of the path every
+period (joint-sync-N -> mc_axis.N.sync-pos).  Where the path asks a member
+for more than its maxv the path slows down for that period (velocity
+override by the joint limits).  At the end the position is held one period
+(the members stop at zero velocity), then sync is released; Done when every
+member stands.  MC_GroupHalt decelerates the path at *deceleration*.  A
+point of the path without an inverse solution, or a member leaving
+SynchronizedMotion, is an ErrorStop (10, 13): sync is released and the
+members decelerate at their maxa.
+
+STATE CODES (pin *state*, Part 4 group diagram): 0 GroupDisabled,
+1 GroupStandby, 2 GroupMoving (a halt too), 5 GroupErrorStop
+(3 GroupHoming, 4 GroupStopping: not produced).  The state is derived from
+the members' states and the group's own command: no second machine.
+
+ERROR IDS (pin *error-id*: newest outcome; *group-error-id*: why the group is
+in ErrorStop): 1 buffer mode not implemented (blending), 2 command not allowed
+in this state, 5 member target outside its soft limits, 7 invalid geometry or
+member limits, 8 unknown or not implemented mode, 10 target unreachable (no
+inverse solution), 11 A/B not 0 (MCS) or elements 4..5 not 0 (ACS),
+12 coordinate system not supported (PCS), 13 a member failed (its error-id
+says why; the others are halted).
+
+ONE MULTIPLEXED FB, as mc_axis: the outputs belong to the newest command;
+Done, CommandAborted and a refusal Error stay while its input is held and are
+reset one period after it falls.  *actual-x* .. *actual-c* are the forward
+kinematics of joint-fb every period (MC_GroupReadActualPosition).
+""";
+
+pin in real shoulder_x "palletkins.shoulder-x";
+pin in real shoulder_z "palletkins.shoulder-z";
+pin in real upper "palletkins.upper";
+pin in real fore "palletkins.fore";
+pin in real flange_x "palletkins.flange-x";
+pin in real flange_y "palletkins.flange-y";
+pin in real flange_z "palletkins.flange-z";
+
+pin in bool enable "MC_GroupEnable (1) / MC_GroupDisable (0)";
+pin in bool execute "rising edge: the move described by mode/coord/buffer-mode/position-*";
+pin in bool halt "rising edge: MC_GroupHalt";
+pin in bool reset "rising edge: MC_GroupReset";
+pin in sint mode "0 MoveDirectAbsolute, 1 MoveLinearAbsolute";
+pin in sint coord "MC_COORD_SYSTEM: 0 ACS, 1 MCS, 2 PCS";
+pin in sint buffer_mode "MC_BUFFER_MODE: 0 mcAborting, 1 mcBuffered, 2..5 blending (refused)";
+pin in real velocity "Linear move: path velocity, mm/s";
+pin in real acceleration "Linear move: path acceleration, mm/s^2";
+pin in real deceleration "Linear move: path deceleration, mm/s^2";
+pin in real jerk "Linear move: path jerk, mm/s^3";
+pin in real position_x "MC_POSITION.X, mm (ACS: member 0)";
+pin in real position_y "MC_POSITION.Y, mm (ACS: member 1)";
+pin in real position_z "MC_POSITION.Z, mm (ACS: member 2)";
+pin in real position_a "MC_POSITION.A, deg (ACS: member 3)";
+pin in real position_b "MC_POSITION.B, deg: must be 0";
+pin in real position_c "MC_POSITION.C, deg (ACS: must be 0)";
+
+pin in real joint_fb_#[4] "mc_axis.N.actual-position";
+pin in real joint_maxv_#[4] "= mc_axis.N.maxv";
+pin in real joint_maxa_#[4] "= mc_axis.N.maxa";
+pin in real joint_min_#[4] "= mc_axis.N.min-limit";
+pin in real joint_max_#[4] "= mc_axis.N.max-limit";
+pin in sint joint_state_#[4] "mc_axis.N.state";
+pin in uint joint_command_id_#[4] "mc_axis.N.command-id";
+pin in uint joint_done_id_#[4] "mc_axis.N.done-id";
+pin in uint joint_aborted_id_#[4] "mc_axis.N.aborted-id";
+pin in uint joint_failed_id_#[4] "mc_axis.N.failed-id";
+
+pin out real joint_cmd_#[4] "to mc_axis.N.position";
+pin out real joint_vel_#[4] "to mc_axis.N.velocity";
+pin out real joint_acc_#[4] "to mc_axis.N.acceleration";
+pin out real joint_sync_#[4] "to mc_axis.N.sync-pos (Linear move)";
+pin out bool member_sync "to mc_axis.N.sync-enable of every member (Linear move)";
+pin out bool member_execute "to mc_axis.N.execute of every member";
+pin out bool member_halt "to mc_axis.N.halt of every member";
+pin out bool member_reset "to mc_axis.N.reset of every member";
+
+pin out sint state "group state code";
+pin out bool busy;
+pin out bool done;
+pin out bool active;
+pin out bool command_aborted;
+pin out bool error;
+pin out sint error_id "outcome of the newest command: refusal code, else the ErrorStop reason";
+pin out sint group_error_id "MC_GroupReadError: why the group is in ErrorStop, 0 outside it";
+pin out uint command_id;
+pin out uint done_id;
+pin out uint aborted_id;
+pin out uint failed_id;
+pin out real actual_x;
+pin out real actual_y;
+pin out real actual_z;
+pin out real actual_c;
+
+variable int seq;          // last command number given out
+variable int owner;        // input of the newest command: 1 execute 2 halt 3 reset, 0 none
+variable int term_shown;   // a terminal output has been out one period
+variable int cmd_err;      // refusal of the newest command
+variable int grp_err;      // ErrorStop reason
+variable int run;          // what the members run for the group: 0 none, 1 move, 2 halt, 3 reset
+variable int run_id;       // its command number
+variable int ex_old;
+variable int halt_old;
+variable int reset_old;
+variable int fire;         // member pulse to raise next: 1 execute 2 halt 3 reset
+variable double tj[4];     // member targets of the running (last issued) move
+variable int inv[4];       // member takes part in the running command
+variable int learned[4];   // its command number is known
+variable unsigned cid0[4]; // member command-id when the pulse went out
+variable unsigned ours[4]; // member command number of the running command
+variable int q_valid;      // a buffered move waits
+variable int q_mode;       // its mode: 0 direct, 1 linear
+variable double q_p[4];    // linear: target X Y Z C
+variable double q_v;
+variable double q_a;
+variable double q_d;
+variable int lin;          // linear phase: 1 members entering sync, 2 path, 3 hold one period, 4 members stopping
+variable int lin_wait;     // periods spent in phase 1
+variable int lin_halt;     // MC_GroupHalt: decelerate the path to a stop
+variable double lp0[4];    // path start X Y Z C
+variable double lp1[4];    // path end
+variable double l_len;     // path length (mm, or deg of C for a pure turn)
+variable double l_s;       // path position
+variable double l_v;       // path velocity
+variable double l_vmax;
+variable double l_acc;
+variable double l_dec;
+variable double qc[4];     // member positions given this period
+variable int q_id;
+variable double q_tj[4];
+
+function _;
+;;
+
+/* palletkins.c compiled in: its module entry points, license line and exported
+ * symbols stay inside this component (hidden; renamed so as not to clash with
+ * halcompile's own).  Its `static struct geom *g` is pointed at this instance's
+ * geometry pins before every call (one thread: no other caller in between). */
+#include <rtapi_math.h>   /* before the hidden scope: libm's declarations keep default visibility */
+#pragma push_macro("rtapi_app_main")
+#pragma push_macro("rtapi_app_exit")
+#pragma push_macro("MODULE_LICENSE")
+#undef rtapi_app_main
+#undef rtapi_app_exit
+#undef MODULE_LICENSE
+#define rtapi_app_main palletkins_app_main_unused
+#define rtapi_app_exit palletkins_app_exit_unused
+#define MODULE_LICENSE(s)
+#pragma GCC visibility push(hidden)
+#include "palletkins.c"
+#pragma GCC visibility pop
+#pragma pop_macro("MODULE_LICENSE")
+#pragma pop_macro("rtapi_app_exit")
+#pragma pop_macro("rtapi_app_main")
+
+#define E_BUFFER_MODE_NOT_IMPLEMENTED 1
+#define E_COMMAND_NOT_ALLOWED_IN_STATE 2
+#define E_SOFT_LIMIT 5
+#define E_INVALID_PARAMETERS 7
+#define E_UNKNOWN_MODE 8
+#define E_UNREACHABLE 10
+#define E_ORIENTATION 11
+#define E_COORD_SYSTEM 12
+#define E_MEMBER_FAILED 13
+
+#define GS_DISABLED 0
+#define GS_STANDBY 1
+#define GS_MOVING 2
+#define GS_ERROR_STOP 5
+#define AX_ERROR_STOP 7     /* mc_axis ST_ERROR_STOP */
+
+#define RUN_NONE 0
+#define RUN_MOVE 1
+#define RUN_HALT 2
+#define RUN_RESET 3
+#define RUN_LIN 4
+#define AX_STANDSTILL 1     /* mc_axis ST_STANDSTILL */
+#define AX_SYNC 5           /* mc_axis ST_SYNCHRONIZED_MOTION */
+
+static void use_geometry(struct __comp_state *__comp_inst, struct geom *gi) {
+    gi->sx = __comp_inst->shoulder_x_p; gi->sz = __comp_inst->shoulder_z_p; gi->u = __comp_inst->upper_p;
+    gi->f = __comp_inst->fore_p; gi->fx = __comp_inst->flange_x_p; gi->fy = __comp_inst->flange_y_p;
+    gi->fz = __comp_inst->flange_z_p;
+    g = gi;
+}
+
+/* The move's member targets into out[4], seeded by seed[4] (the branch nearest to it); 0 or a refusal code. */
+static int resolve(struct __comp_state *__comp_inst, const double *seed, double *out) {
+    struct geom gi;
+    double jt[EMCMOT_MAX_JOINTS] = {0};
+    EmcPose p = {{0, 0, 0}, 0, 0, 0, 0, 0, 0};
+    KINEMATICS_FORWARD_FLAGS ff = 0;
+    KINEMATICS_INVERSE_FLAGS fi = 0;
+    int i;
+    if (buffer_mode < 0 || buffer_mode > 5) return E_UNKNOWN_MODE;
+    if (buffer_mode > 1) return E_BUFFER_MODE_NOT_IMPLEMENTED;
+    if (mode != 0 && mode != 1) return E_UNKNOWN_MODE;
+    if (mode == 1) {
+        if (coord != 1) return E_COORD_SYSTEM;
+        if (!(velocity > 0.0 && acceleration > 0.0 && deceleration >= 0.0 && jerk == 0.0)) return E_INVALID_PARAMETERS;
+    }
+    if (coord == 0) {
+        if (position_b != 0.0 || position_c != 0.0) return E_ORIENTATION;
+        out[0] = position_x; out[1] = position_y; out[2] = position_z; out[3] = position_a;
+    } else if (coord == 1) {
+        if (!(upper > 0.0 && fore > 0.0)) return E_INVALID_PARAMETERS;
+        if (position_a != 0.0 || position_b != 0.0) return E_ORIENTATION;
+        for (i = 0; i < 4; i++) jt[i] = seed[i];
+        p.tran.x = position_x; p.tran.y = position_y; p.tran.z = position_z; p.c = position_c;
+        use_geometry(__comp_inst, &gi);
+        if (kinematicsInverse(&p, jt, &fi, &ff) != 0) return E_UNREACHABLE;
+        for (i = 0; i < 4; i++) out[i] = jt[i];
+    } else if (coord == 2) {
+        return E_COORD_SYSTEM;
+    } else {
+        return E_UNKNOWN_MODE;
+    }
+    for (i = 0; i < 4; i++) {
+        if (!(joint_maxv(i) > 0.0 && joint_maxa(i) > 0.0 && joint_max(i) > joint_min(i))) return E_INVALID_PARAMETERS;
+        if (out[i] < joint_min(i) || out[i] > joint_max(i)) return E_SOFT_LIMIT;
+    }
+    return 0;
+}
+
+/* Synchronized Direct move to t[4] from the actual member positions: one normalized trapezoid for all. */
+static void issue_move(struct __comp_state *__comp_inst, const double *t, int id) {
+    double V = 1e300, A = 1e300, dd;
+    int i;
+    for (i = 0; i < 4; i++) {
+        dd = fabs(t[i] - joint_fb(i));
+        if (dd > 0.0) {
+            if (joint_maxv(i) / dd < V) V = joint_maxv(i) / dd;
+            if (joint_maxa(i) / dd < A) A = joint_maxa(i) / dd;
+        }
+    }
+    for (i = 0; i < 4; i++) {
+        dd = fabs(t[i] - joint_fb(i));
+        tj[i] = t[i];
+        joint_cmd_set(i, t[i]);
+        /* a member that stays: a null move at its limits (mc_axis refuses velocity 0) */
+        joint_vel_set(i, dd > 0.0 ? V * dd : joint_maxv(i));
+        joint_acc_set(i, dd > 0.0 ? A * dd : joint_maxa(i));
+    }
+    run = RUN_MOVE; run_id = id; fire = 1;
+    if (id == (int)command_id) active_set(1);
+}
+
+static void issue_members(struct __comp_state *__comp_inst, int what, int id, int only_errorstop) {
+    int i;
+    run = what; run_id = id; fire = what == RUN_HALT ? 2 : 3;
+    for (i = 0; i < 4; i++) inv[i] = !only_errorstop || joint_state(i) == AX_ERROR_STOP;
+}
+
+/* Members at path fraction f (0..1) of the running Linear move, seeded by qc; 0 or -1 (no inverse solution). */
+static int path_ik(struct __comp_state *__comp_inst, double f, double *out) {
+    struct geom gi;
+    double jt[EMCMOT_MAX_JOINTS] = {0};
+    EmcPose p = {{0, 0, 0}, 0, 0, 0, 0, 0, 0};
+    KINEMATICS_FORWARD_FLAGS ff = 0;
+    KINEMATICS_INVERSE_FLAGS fi = 0;
+    int i;
+    for (i = 0; i < 4; i++) jt[i] = qc[i];
+    p.tran.x = lp0[0] + (lp1[0] - lp0[0]) * f; p.tran.y = lp0[1] + (lp1[1] - lp0[1]) * f;
+    p.tran.z = lp0[2] + (lp1[2] - lp0[2]) * f; p.c = lp0[3] + (lp1[3] - lp0[3]) * f;
+    use_geometry(__comp_inst, &gi);
+    if (kinematicsInverse(&p, jt, &fi, &ff) != 0) return -1;
+    for (i = 0; i < 4; i++) out[i] = jt[i];
+    return 0;
+}
+
+/* Linear move from the members' actual positions to p1 (X Y Z C): the members enter SynchronizedMotion first. */
+static void start_linear(struct __comp_state *__comp_inst, const double *p1, double v, double a, double d, int id) {
+    struct geom gi;
+    double jf[EMCMOT_MAX_JOINTS] = {0}, dx, dy, dz;
+    EmcPose p = {{0, 0, 0}, 0, 0, 0, 0, 0, 0};
+    KINEMATICS_FORWARD_FLAGS ff = 0;
+    KINEMATICS_INVERSE_FLAGS fi = 0;
+    int i;
+    for (i = 0; i < 4; i++) { qc[i] = jf[i] = joint_fb(i); joint_sync_set(i, qc[i]); lp1[i] = p1[i]; }
+    use_geometry(__comp_inst, &gi);
+    kinematicsForward(jf, &p, &ff, &fi);
+    lp0[0] = p.tran.x; lp0[1] = p.tran.y; lp0[2] = p.tran.z; lp0[3] = p.c;
+    dx = lp1[0] - lp0[0]; dy = lp1[1] - lp0[1]; dz = lp1[2] - lp0[2];
+    l_len = sqrt(dx * dx + dy * dy + dz * dz);
+    if (l_len == 0.0) l_len = fabs(lp1[3] - lp0[3]);
+    l_s = 0.0; l_v = 0.0; l_vmax = v; l_acc = a; l_dec = d > 0.0 ? d : a;
+    lin = 1; lin_wait = 0; lin_halt = 0;
+    member_sync_set(1);
+    run = RUN_LIN; run_id = id;
+    if (id == (int)command_id) active_set(1);
+}
+
+/* The running command ends: done (0), aborted (1) or failed (2); its outputs only while it is the newest. */
+static void end_run(struct __comp_state *__comp_inst, int how) {
+    int mine = busy && run_id == (int)command_id;
+    if (run_id) {
+        if (how == 0) done_id_set(run_id); else if (how == 1) aborted_id_set(run_id); else failed_id_set(run_id);
+    }
+    if (mine) {
+        if (how == 0) done_set(1); else if (how == 1) command_aborted_set(1);
+        term_shown = 0; busy_set(0); active_set(0);
+    }
+    run = RUN_NONE; run_id = 0; fire = 0;
+}
+
+static void to_errorstop(struct __comp_state *__comp_inst, int id) {
+    if (run) end_run(__comp_inst, 2);
+    member_sync_set(0); lin = 0;   /* the members decelerate at their maxa */
+    if (q_valid) { failed_id_set(q_id); q_valid = 0; }
+    grp_err = id; cmd_err = 0;
+    busy_set(0); active_set(0);
+    state_set(GS_ERROR_STOP);
+}
+
+static void next_from_queue(struct __comp_state *__comp_inst) {
+    if (!q_valid) return;
+    q_valid = 0;
+    if (q_id == (int)command_id) busy_set(1);
+    if (q_mode == 1) start_linear(__comp_inst, q_p, q_v, q_a, q_d, q_id);
+    else issue_move(__comp_inst, q_tj, q_id);
+}
+
+/* One period of the Linear move (run == RUN_LIN). */
+static void linear_step(struct __comp_state *__comp_inst, double dt) {
+    double rem, vreq, vn, ds, qn[4], r, st;
+    int i, k, all = 1, err;
+    if (lin == 1) {   /* the members enter SynchronizedMotion */
+        for (i = 0; i < 4; i++) if (joint_state(i) != AX_SYNC) all = 0;
+        if (all) lin = 2;
+        else if (++lin_wait > 2) { to_errorstop(__comp_inst, E_MEMBER_FAILED); return; }
+        if (lin == 1) return;
+    }
+    if (lin >= 2) for (i = 0; i < 4; i++) if (lin < 4 && joint_state(i) != AX_SYNC) { to_errorstop(__comp_inst, E_MEMBER_FAILED); return; }
+    if (lin == 2) {
+        rem = l_len - l_s;
+        vreq = lin_halt ? 0.0 : l_vmax;
+        if (sqrt(2.0 * l_dec * rem) < vreq) vreq = sqrt(2.0 * l_dec * rem);
+        vn = vreq > l_v ? (vreq < l_v + l_acc * dt ? vreq : l_v + l_acc * dt)
+                        : (vreq > l_v - l_dec * dt ? vreq : l_v - l_dec * dt);
+        ds = 0.5 * (l_v + vn) * dt;
+        if (ds >= rem || (!lin_halt && rem <= 0.0)) ds = rem;
+        err = l_len > 0.0 ? path_ik(__comp_inst, (l_s + ds) / l_len, qn) : (qn[0] = qc[0], qn[1] = qc[1], qn[2] = qc[2], qn[3] = qc[3], 0);
+        /* velocity override by the joint limits: the step shrinks until every member is within its maxv */
+        for (k = 0; !err && k < 8; k++) {
+            r = 0.0;
+            for (i = 0; i < 4; i++) { st = fabs(qn[i] - qc[i]) / (joint_maxv(i) * dt); if (st > r) r = st; }
+            if (r <= 1.0) break;
+            ds /= r; vn = 2.0 * ds / dt - l_v; if (vn < 0.0) vn = 0.0;
+            err = path_ik(__comp_inst, (l_s + ds) / l_len, qn);
+        }
+        if (err) { to_errorstop(__comp_inst, E_UNREACHABLE); return; }
+        l_s += ds; l_v = vn;
+        for (i = 0; i < 4; i++) { qc[i] = qn[i]; joint_sync_set(i, qn[i]); }
+        if (l_s >= l_len || (lin_halt && l_v == 0.0)) { lin = 3; lin_wait = 0; }
+    } else if (lin == 3) {   /* the last position held one period (the members' velocity goes to 0), then released */
+        if (++lin_wait >= 2) { member_sync_set(0); lin = 4; }
+    } else if (lin == 4) {
+        for (i = 0; i < 4; i++) if (joint_state(i) != AX_STANDSTILL) all = 0;
+        if (all) { lin = 0; end_run(__comp_inst, 0); next_from_queue(__comp_inst); }
+    }
+}
+
+FUNCTION(_) {
+    int ex_edge = execute && !ex_old, halt_edge = halt && !halt_old, reset_edge = reset && !reset_old;
+    int i, all, any_failed, any_aborted, any_axis_err = 0, e;
+    double t[4], seed[4];
+    struct geom gi;
+    double jf[EMCMOT_MAX_JOINTS] = {0};
+    EmcPose p = {{0, 0, 0}, 0, 0, 0, 0, 0, 0};
+    KINEMATICS_FORWARD_FLAGS ff = 0;
+    KINEMATICS_INVERSE_FLAGS fi = 0;
+    ex_old = execute; halt_old = halt; reset_old = reset;
+
+    /* member pulses are one period long; a pulse waits one low period after the previous one */
+    if (member_execute || member_halt || member_reset) {
+        member_execute_set(0); member_halt_set(0); member_reset_set(0);
+    } else if (fire) {
+        for (i = 0; i < 4; i++) {
+            cid0[i] = joint_command_id(i); learned[i] = 0;
+            if (fire == 1) inv[i] = 1;
+        }
+        if (fire == 1) member_execute_set(1); else if (fire == 2) member_halt_set(1); else member_reset_set(1);
+        fire = 0;
+    }
+
+    /* terminal outputs (PLCopen Part 1, 2.4.1), as mc_axis */
+    {
+        int held = (owner == 1 && execute) || (owner == 2 && halt) || (owner == 3 && reset);
+        if (done || command_aborted || cmd_err) {
+            if (term_shown && !held) { done_set(0); command_aborted_set(0); cmd_err = 0; }
+            term_shown = 1;
+        }
+    }
+    if (ex_edge || halt_edge || reset_edge) {
+        cmd_err = 0; command_aborted_set(0); done_set(0); term_shown = 0; busy_set(0); active_set(0);
+        owner = ex_edge ? 1 : halt_edge ? 2 : 3;
+        seq = seq == 0x7fffffff ? 1 : seq + 1;
+        command_id_set(seq);
+    }
+
+    /* the members' answers to the running command, by their numbers */
+    if (run == RUN_LIN) linear_step(__comp_inst, period * 1e-9);
+    else if (run && !fire && !member_execute && !member_halt && !member_reset) {
+        all = 1; any_failed = 0; any_aborted = 0;
+        for (i = 0; i < 4; i++) {
+            if (!inv[i]) continue;
+            if (!learned[i] && joint_command_id(i) != cid0[i]) { ours[i] = joint_command_id(i); learned[i] = 1; }
+            if (!learned[i]) { all = 0; continue; }
+            if (joint_failed_id(i) == ours[i]) any_failed = 1;
+            else if (joint_aborted_id(i) == ours[i]) any_aborted = 1;
+            else if (run == RUN_RESET ? joint_state(i) == AX_ERROR_STOP : joint_done_id(i) != ours[i]) all = 0;
+        }
+        if (any_failed && run == RUN_MOVE) { member_halt_set(1); to_errorstop(__comp_inst, E_MEMBER_FAILED); }
+        else if (any_failed || any_aborted) end_run(__comp_inst, 1);
+        else if (all) {
+            if (run == RUN_RESET) grp_err = 0;
+            end_run(__comp_inst, 0);
+            next_from_queue(__comp_inst);
+        }
+    }
+
+    for (i = 0; i < 4; i++) if (joint_state(i) == AX_ERROR_STOP) any_axis_err = 1;
+
+    /* derived state */
+    if (!enable) {
+        if (run) { int was_move = run == RUN_MOVE; end_run(__comp_inst, 1); if (was_move) fire = 2; }   /* members halt */
+        member_sync_set(0); lin = 0;   /* a Linear move: the members decelerate at their maxa */
+        if (q_valid) { aborted_id_set(q_id); q_valid = 0; }
+        state_set(GS_DISABLED);
+    } else if (state == GS_DISABLED) {
+        state_set(GS_STANDBY);
+    }
+    if (enable && any_axis_err && state != GS_ERROR_STOP && run != RUN_RESET) to_errorstop(__comp_inst, E_MEMBER_FAILED);
+    if (state != GS_ERROR_STOP && state != GS_DISABLED) state_set(run == RUN_MOVE || run == RUN_HALT || run == RUN_LIN || q_valid ? GS_MOVING : GS_STANDBY);
+
+    /* this period's command */
+    if (ex_edge) {
+        if (state == GS_DISABLED || state == GS_ERROR_STOP || run == RUN_HALT) cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;
+        else if (state == GS_MOVING && buffer_mode == 1) {
+            if (q_valid) cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;
+            else if ((e = resolve(__comp_inst, tj, t))) cmd_err = e;
+            else {
+                for (i = 0; i < 4; i++) q_tj[i] = t[i];
+                q_p[0] = position_x; q_p[1] = position_y; q_p[2] = position_z; q_p[3] = position_c;
+                q_mode = mode; q_v = velocity; q_a = acceleration; q_d = deceleration;
+                q_id = seq; q_valid = 1; busy_set(1);
+            }
+        } else if (state == GS_MOVING && (mode == 1 || run == RUN_LIN)) {
+            cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;   /* a Linear move neither aborts nor is aborted by a move */
+        } else {
+            for (i = 0; i < 4; i++) seed[i] = joint_fb(i);
+            if ((e = resolve(__comp_inst, seed, t))) cmd_err = e;
+            else {
+                if (run) end_run(__comp_inst, 1);
+                if (q_valid) { aborted_id_set(q_id); q_valid = 0; }
+                busy_set(1); state_set(GS_MOVING);
+                if (mode == 1) { double p1[4] = {position_x, position_y, position_z, position_c};
+                                 start_linear(__comp_inst, p1, velocity, acceleration, deceleration, seq); }
+                else issue_move(__comp_inst, t, seq);
+            }
+        }
+    } else if (halt_edge) {
+        if (state == GS_DISABLED || state == GS_ERROR_STOP) cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;
+        else if (state == GS_STANDBY) { done_set(1); term_shown = 0; done_id_set(seq); }
+        else if (run == RUN_LIN) {   /* the path decelerates itself; the move is aborted, the halt owns the run */
+            if (run_id) aborted_id_set(run_id);
+            if (q_valid) { aborted_id_set(q_id); q_valid = 0; }
+            run_id = seq; lin_halt = 1; busy_set(1); active_set(1);
+        } else {
+            if (run) end_run(__comp_inst, 1);
+            if (q_valid) { aborted_id_set(q_id); q_valid = 0; }
+            issue_members(__comp_inst, RUN_HALT, seq, 0); busy_set(1); active_set(1); state_set(GS_MOVING);
+        }
+    } else if (reset_edge) {
+        if (state != GS_ERROR_STOP) {
+            if (state == GS_DISABLED || state == GS_STANDBY) { done_set(1); term_shown = 0; done_id_set(seq); }
+            else cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;
+        } else if (!any_axis_err) {
+            grp_err = 0; state_set(GS_STANDBY); done_set(1); term_shown = 0; done_id_set(seq);
+        } else {
+            issue_members(__comp_inst, RUN_RESET, seq, 1); busy_set(1); active_set(1);
+        }
+    }
+    if (cmd_err && (ex_edge || halt_edge || reset_edge)) failed_id_set(seq);
+
+    group_error_id_set(state == GS_ERROR_STOP ? grp_err : 0);
+    error_set(cmd_err != 0 || (state == GS_ERROR_STOP && !busy && !done));
+    error_id_set(cmd_err ? cmd_err : state == GS_ERROR_STOP ? grp_err : 0);
+
+    use_geometry(__comp_inst, &gi);
+    for (i = 0; i < 4; i++) jf[i] = joint_fb(i);
+    kinematicsForward(jf, &p, &ff, &fi);
+    actual_x_set(p.tran.x);
+    actual_y_set(p.tran.y);
+    actual_z_set(p.tran.z);
+    actual_c_set(p.c);
+}

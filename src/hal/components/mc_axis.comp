@@ -19,7 +19,18 @@ of clipping it, checks the following error, and reports why it stopped.
 
 STATE CODES (pin *state*, PLCopen axis state diagram): 0 Disabled,
 1 Standstill, 2 Homing, 3 DiscreteMotion, 4 ContinuousMotion,
-5 SynchronizedMotion (not produced), 6 Stopping, 7 ErrorStop.
+5 SynchronizedMotion, 6 Stopping, 7 ErrorStop.
+
+SYNCHRONIZED MOTION (pins *sync-enable*, *sync-pos*): the axis as a member
+of an axes group that interpolates it (PLCopen Part 4, e.g. *mc_group*(9)
+in a linear move).  A rising edge of sync-enable in Standstill enters
+SynchronizedMotion; every period pos-cmd takes sync-pos (axis frame), refused
+into ErrorStop when it is outside the soft limits (5) or one period's step
+is over maxv (10): the master plans within the limits, the axis does not
+clip.  sync-enable falling leaves it: decelerate at maxa (DiscreteMotion),
+then Standstill.  Execute/halt/home/set-position are refused there (2),
+MC_Stop stops it.  No command number: the master owns the state.  Not with
+drive-profile (the axis stays in Standstill).
 
 BUFFER MODE (pin *buffer-mode*): 0 mcAborting (the only one
 implemented), 1 mcBuffered, 2..5 the mcBlending modes.  Anything but 0 is refused
@@ -42,7 +53,8 @@ not allowed in this state, 3 drive fault, 4 following error over ferror-max,
 5 soft limit (target outside, or reached in velocity mode), 6 drive left
 operation-enabled while powered, 7 invalid limits/parameters (maxv, maxa,
 ferror-max must be > 0, max-limit > min-limit), 8 unknown mode, 9 homing
-error (statusword bit 13 while the drive homes).
+error (statusword bit 13 while the drive homes), 10 synchronized step over
+maxv.
 
 ONE MULTIPLEXED FB: one set of outputs per axis, not one per function block
 instance.  The outputs belong to the NEWEST command or event, so that Busy,
@@ -160,6 +172,8 @@ pin in real deceleration "deceleration of the move (|v| falling), capped by maxa
 pin in real jerk "jerk limit of the move; 0 = none (trapezoid), > 0 = S-curve (velocity moves only)";
 pin in sint mode "0 absolute, 1 relative, 2 velocity (set-position: 0 absolute, 1 relative)";
 pin in sint buffer_mode "index in BUFFER_MODES; only 0 (mcAborting) implemented";
+pin in bool sync_enable "rising edge in Standstill: SynchronizedMotion, pos-cmd follows sync-pos (axes group master)";
+pin in real sync_pos "SynchronizedMotion: the position the master gives this period (axis frame)";
 
 // ---- limits, as in [JOINT_n] of a machine config
 pin in real min_limit "soft limit low, [JOINT_n]MIN_LIMIT";
@@ -235,6 +249,7 @@ variable int stop_old;
 variable int reset_old;
 variable int home_old;
 variable int set_old;
+variable int sync_old;
 variable double off;        // MC_SetPosition offset: axis position = drive position (pos-fb) + off
 variable int home_started;  // homing armed: stat-homed seen 0 since the request
 variable int move_armed;    // drive-profile: drv-move-done seen 0 since the set-point (a halt keeps it:
@@ -265,6 +280,7 @@ function _;
 #define E_INVALID_LIMITS_OR_PARAMETERS 7
 #define E_UNKNOWN_MODE 8
 #define E_HOMING_ERROR 9
+#define E_SYNC_STEP_OVER_MAXV 10
 
 #define RUN_NONE 0
 #define RUN_POS  1
@@ -430,9 +446,10 @@ FUNCTION(_) {
     int reset_edge = reset && !reset_old;
     int home_edge = home && !home_old;
     int set_edge = set_position && !set_old;
+    int sync_edge = sync_enable && !sync_old;
     int cfg = limits_ok(__comp_inst);
     execute_old = execute; halt_old = halt; stop_old = stop;
-    reset_old = reset; home_old = home; set_old = set_position;
+    reset_old = reset; home_old = home; set_old = set_position; sync_old = sync_enable;
     if (drive_profile) move_execute_set(0);   /* a set-point is one period long */
 
     /* PLCopen Part 1, 2.4.1: Done, CommandAborted and a command's Error stay while the
@@ -512,6 +529,28 @@ FUNCTION(_) {
             done_set(1); term_shown = 0; done_id_set(command_id);
         } else if (ex_edge) {
             if (accept_move(__comp_inst)) { busy_set(1); active_set(1); }
+        } else if (sync_edge && !drive_profile) {
+            state_set(ST_SYNCHRONIZED_MOTION);
+        }
+        break;
+
+    case ST_SYNCHRONIZED_MOTION:
+        if (stop_edge) {
+            busy_set(1); active_set(1);
+            state_set(ST_STOPPING); run = RUN_STOP; ramps_max(__comp_inst);
+        } else if (ex_edge || halt_edge || home_edge || set_edge) {
+            cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;
+        }
+        if (state != ST_SYNCHRONIZED_MOTION) break;
+        if (!sync_enable) {   /* the master let go: decelerate from the last step's velocity */
+            run = RUN_STOP; ramps_max(__comp_inst); state_set(ST_DISCRETE_MOTION);
+            break;
+        }
+        {
+            double t = sync_pos - off, lo = min_limit - off, hi = max_limit - off;
+            if (limits_enable && (t < lo || t > hi)) to_errorstop(__comp_inst, E_SOFT_LIMIT);
+            else if (fabs(t - pos_cmd) > maxv * dt) to_errorstop(__comp_inst, E_SYNC_STEP_OVER_MAXV);
+            else { v = (t - pos_cmd) / dt; a_cur = 0.0; pos_cmd_set(t); }
         }
         break;
 
@@ -654,7 +693,7 @@ FUNCTION(_) {
         }
         break;
 
-    default:  /* SynchronizedMotion is not produced; anything else is a bug */
+    default:  /* every state has its case; anything else is a bug */
         to_errorstop(__comp_inst, E_COMMAND_NOT_ALLOWED_IN_STATE);
         break;
     }
