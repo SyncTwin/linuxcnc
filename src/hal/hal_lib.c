@@ -162,7 +162,6 @@ static void free_oldname_struct(hal_oldname_t * oldname);
 static void free_funct_struct(hal_funct_t * funct);
 #endif /* RTAPI */
 static void free_funct_entry_struct(hal_funct_entry_t * funct_entry);
-static hal_list_t *funct_entry_unlink(hal_list_t * entry);
 static int thread_wait_quiescent(hal_thread_t * thread);
 #ifdef RTAPI
 static void free_thread_struct(hal_thread_t * thread);
@@ -2644,7 +2643,7 @@ int hal_del_funct_from_thread(const char *funct_name, const char *thread_name)
 	funct_entry = (hal_funct_entry_t *) list_entry;
 	if (SHMPTR(funct_entry->funct_ptr) == funct) {
 	    /* this funct entry points to our funct, unlink */
-	    funct_entry_unlink(list_entry);
+	    list_remove_entry(list_entry);
 	    /* the realtime thread walks the list without the mutex; it may
 	       be standing on this entry right now. Don't recycle the entry
 	       (or let the caller unload the code) until the thread has
@@ -3867,7 +3866,7 @@ static void free_funct_struct(hal_funct_t * funct)
 		/* test it */
 		if (SHMPTR(funct_entry->funct_ptr) == funct) {
 		    /* this funct entry points to our funct, unlink */
-		    list_entry = funct_entry_unlink(list_entry);
+		    list_entry = list_remove_entry(list_entry);
 		    /* let the thread leave it before it is recycled and the
 		       code behind it is unloaded */
 		    if (thread_wait_quiescent(thread) < 0) {
@@ -3912,22 +3911,6 @@ static void free_funct_struct(hal_funct_t * funct)
     hal_data->funct_free_ptr = SHMOFF(funct);
 }
 #endif /* RTAPI */
-
-/* Unlink a funct entry from a list the realtime thread may be walking.
-   Unlike list_remove_entry() the entry keeps its own links, so a thread
-   standing on it still reaches the rest of the list instead of looping on
-   the entry. The entry must not be reused before thread_wait_quiescent().
-   Returns the next entry. */
-static hal_list_t *funct_entry_unlink(hal_list_t * entry)
-{
-    hal_list_t *prev, *next;
-
-    prev = SHMPTR(entry->prev);
-    next = SHMPTR(entry->next);
-    prev->next = entry->next;
-    next->prev = entry->prev;
-    return next;
-}
 
 /* Number of thread periods to wait for a running thread to finish the
    pass that may still reference an unlinked funct entry. */
