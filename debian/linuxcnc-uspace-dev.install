@@ -1,6 +1,4 @@
 usr/bin/halcompile
-usr/bin/iec2comp
-usr/share/linuxcnc/iec/
 usr/include/linuxcnc
 usr/lib/liblinuxcnc.a
 usr/lib/*.so
