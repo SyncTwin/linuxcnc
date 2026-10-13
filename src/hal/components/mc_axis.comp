@@ -121,6 +121,12 @@ MC_ReadActualVelocity): a caller reads them at the axis, never at the bus:
 mille of rated torque, as the drive reports object 0x6077), *velocity-fb*
 (machine units/s) and *statusword* (object 0x6041 as is).  They are fed by
 the raw inputs drv-torque, drv-velocity and drv-statusword.
+
+TOUCH PROBES 1 and 2 (MC_TouchProbe, CiA 402 0x60B8-0x60BD), probe k: the
+writer of *probe.k.pos* (drive frame, as 0x60BA/0x60BC) and *probe.k.seq* (+1
+per latched edge) changes seq in the same period as pos or later.  On a seq change the
+axis takes *probe.k.recorded-position* = pos + the MC_SetPosition offset and
+*probe.k.recorded-seq* = seq; a caller reads both at the axis.
 """;
 
 notes
@@ -228,6 +234,16 @@ pin out real torque_fb "MC_ReadActualTorque: per mille of rated torque";
 pin out real velocity_fb "MC_ReadActualVelocity: machine units/s";
 pin out uint statusword "drive statusword 0x6041 as read";
 
+// ---- touch probes 1 and 2 (MC_TouchProbe; CiA 402 0x60B8-0x60BD: a drive has two)
+pin in real probe.1.pos "latched position of probe 1 in the drive frame (pos-fb frame, 0x60BA), written with probe.1.seq";
+pin in sint probe.1.seq "probe 1 event counter: changes once per latched edge (the 0x60B9 toggle as a count)";
+pin out real probe.1.recorded_position "MC_TouchProbe.RecordedPosition: probe.1.pos + the MC_SetPosition offset, taken when probe.1.seq changes";
+pin out sint probe.1.recorded_seq "probe.1.seq of the recorded position (changes in the same period)";
+pin in real probe.2.pos "latched position of probe 2 in the drive frame (0x60BC), written with probe.2.seq";
+pin in sint probe.2.seq "probe 2 event counter";
+pin out real probe.2.recorded_position "probe.2.pos + the MC_SetPosition offset, taken when probe.2.seq changes";
+pin out sint probe.2.recorded_seq "probe.2.seq of the recorded position";
+
 variable double v;          // profile velocity
 variable double tgt;        // position target of the running move
 variable double cmd_vel;    // velocity cap / target of the running move
@@ -252,6 +268,8 @@ variable int set_old;
 variable int sync_old;
 variable double off;        // MC_SetPosition offset: axis position = drive position (pos-fb) + off
 variable int home_started;  // homing armed: stat-homed seen 0 since the request
+variable int probe1_old;   // probe.1.seq already recorded
+variable int probe2_old;   // probe.2.seq already recorded
 variable int move_armed;    // drive-profile: drv-move-done seen 0 since the set-point (a halt keeps it:
                             // done already 1 at the halt means the drive stands)
 
@@ -723,6 +741,16 @@ FUNCTION(_) {
     axis_error_id_set(err_latched);
 
     actual_position_set(pos_fb + off);
+    if (probe_1_seq != probe1_old) {   /* snapshot at the latch: a later MC_SetPosition does not move it */
+        probe1_old = probe_1_seq;
+        probe_1_recorded_position_set(probe_1_pos + off);
+        probe_1_recorded_seq_set(probe_1_seq);
+    }
+    if (probe_2_seq != probe2_old) {
+        probe2_old = probe_2_seq;
+        probe_2_recorded_position_set(probe_2_pos + off);
+        probe_2_recorded_seq_set(probe_2_seq);
+    }
     torque_fb_set((double)drv_torque);
     velocity_fb_set(drv_velocity);
     statusword_set(drv_statusword);
