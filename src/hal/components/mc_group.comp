@@ -427,9 +427,24 @@ static void next_from_queue(struct __comp_state *__comp_inst) {
     else issue_move(__comp_inst, q_tj, q_id);
 }
 
+/* The members' synchronized step ceiling is mc_axis's |sync-pos - pos-cmd| <= maxv*dt (error 10), checked
+ * with no tolerance; the group fills it up to this fraction.
+ * ПРЕДПОЛОЖЕНИЕ, не замер: 1 - 1e-6 — a relative margin far above the rounding of the axis's offset
+ * subtraction (~1e-12 of maxv*dt at positions of hundreds of deg and 1 ms periods), far below
+ * anything the path velocity notices (1 ppm). */
+#define SYNC_STEP_FILL (1.0 - 1e-6)
+
+/* The largest member step of qn from qc, as a fraction of its admissible step (> 1: refused). */
+static double step_ratio(struct __comp_state *__comp_inst, const double *qn, double dt) {
+    double r = 0.0, st;
+    int i;
+    for (i = 0; i < 4; i++) { st = fabs(qn[i] - qc[i]) / (joint_maxv(i) * dt * SYNC_STEP_FILL); if (st > r) r = st; }
+    return r;
+}
+
 /* One period of the Linear move (run == RUN_LIN). */
 static void linear_step(struct __comp_state *__comp_inst, double dt) {
-    double rem, vreq, vn, ds, qn[4], r, st;
+    double rem, vreq, vn, ds, ds0, qn[4], r;
     int i, k, all = 1, err;
     if (lin == 1) {   /* the members enter SynchronizedMotion */
         for (i = 0; i < 4; i++) if (joint_state(i) != AX_SYNC) all = 0;
@@ -447,15 +462,41 @@ static void linear_step(struct __comp_state *__comp_inst, double dt) {
         ds = 0.5 * (l_v + vn) * dt;
         if (ds >= rem || (!lin_halt && rem <= 0.0)) ds = rem;
         err = l_len > 0.0 ? path_ik(__comp_inst, (l_s + ds) / l_len, qn) : (qn[0] = qc[0], qn[1] = qc[1], qn[2] = qc[2], qn[3] = qc[3], 0);
-        /* velocity override by the joint limits: the step shrinks until every member is within its maxv */
+        /* Velocity override by the joint limits (time scaling): the path stays, the step along it
+         * shrinks until every member's step is within SYNC_STEP_FILL of its maxv*dt.  mc_axis refuses
+         * a synchronized step over maxv*dt with no tolerance (error 10), and it compares in its own
+         * frame (sync-pos minus its offset), so a step exactly at the ceiling may land an ulp over:
+         * the group aims strictly inside.  Secant shrink first (the step is ~linear in ds), then
+         * bisection on [0, ds] (ds = 0 is the current position, always admissible), so the group
+         * never hands a member a step it refuses, however curved the joint path is. */
+        ds0 = ds;
         for (k = 0; !err && k < 8; k++) {
-            r = 0.0;
-            for (i = 0; i < 4; i++) { st = fabs(qn[i] - qc[i]) / (joint_maxv(i) * dt); if (st > r) r = st; }
+            r = step_ratio(__comp_inst, qn, dt);
             if (r <= 1.0) break;
-            ds /= r; vn = 2.0 * ds / dt - l_v; if (vn < 0.0) vn = 0.0;
+            ds /= r;
             err = path_ik(__comp_inst, (l_s + ds) / l_len, qn);
         }
+        if (!err && step_ratio(__comp_inst, qn, dt) > 1.0) {
+            double lo = 0.0, hi = ds, qlo[4];
+            for (i = 0; i < 4; i++) qlo[i] = qc[i];
+            for (k = 0; !err && k < 40; k++) {
+                double mid = 0.5 * (lo + hi);
+                err = path_ik(__comp_inst, (l_s + mid) / l_len, qn);
+                if (!err && step_ratio(__comp_inst, qn, dt) <= 1.0) { lo = mid; for (i = 0; i < 4; i++) qlo[i] = qn[i]; }
+                else hi = mid;
+            }
+            ds = lo; for (i = 0; i < 4; i++) qn[i] = qlo[i];
+        }
         if (err) { to_errorstop(__comp_inst, E_UNREACHABLE); return; }
+        if (ds < ds0) { vn = 2.0 * ds / dt - l_v; if (vn < 0.0) vn = 0.0; }   /* the override slowed the path */
+        /* Last guard, the members' contract: every step inside q_prev +- maxv*dt*SYNC_STEP_FILL.
+         * After the search above it moves nothing (the step is already inside); it bounds the
+         * path deviation by the same margin, never more. */
+        for (i = 0; i < 4; i++) {
+            double lim = joint_maxv(i) * dt * SYNC_STEP_FILL;
+            if (qn[i] > qc[i] + lim) qn[i] = qc[i] + lim;
+            if (qn[i] < qc[i] - lim) qn[i] = qc[i] - lim;
+        }
         l_s += ds; l_v = vn;
         for (i = 0; i < 4; i++) { qc[i] = qn[i]; joint_sync_set(i, qn[i]); }
         if (l_s >= l_len || (lin_halt && l_v == 0.0)) { lin = 3; lin_wait = 0; }
