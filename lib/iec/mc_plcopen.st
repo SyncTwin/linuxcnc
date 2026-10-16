@@ -15,9 +15,11 @@
    deceleration = acceleration, jerk = none — TwinCAT "0 = axis default"; Acceleration/Deceleration/Jerk are optional
    "E" inputs in P1). Active: this instance owns the axis's newest command and the axis is still Busy with it. Busy runs to the end
    whatever Execute does. MC_MoveVelocity: InVelocity instead of Done, Busy stays until aborted.
-   ⚠ MATIEC runs no final scan of an N action whose step left (IEC 61131-3 2.6.4.5 asks for one with Q
-   FALSE): an FB not called last tick had Execute FALSE — hence LastTick, else re-entry into the same step
-   gives no rising edge (proven by a test run). *)
+   ⚠ MATIEC runs the final scan of an N action whose step left (IEC 61131-3 2.6.4.5, Q FALSE; generated C:
+   pass 0 of `Actions execution`): the FB is called once more with Execute = step.X = FALSE, which clears
+   Done/Error/ErrorID — read them in the step's own action, never from the next step (RP32 Transfer 09.10:
+   StopReason took the cleared ErrorID 0, no Hold, 329 retries). An FB not called last tick had Execute FALSE —
+   hence LastTick, so a re-entry is a rising edge however the step was left. *)
 TYPE
   AXIS_REF : STRUCT AxisNo : INT; END_STRUCT;
 END_TYPE
@@ -164,5 +166,23 @@ FUNCTION_BLOCK MC_ReadAxisError
     if (en) ok = iec_axis_error(GetFbVar(AXIS, .AXISNO.value), &aid);
     SetFbVar(VALID, en && ok); SetFbVar(BUSY, en && ok); SetFbVar(ERROR, en && !ok); SetFbVar(ERRORID, en && !ok ? 1 : 0);
     SetFbVar(AXISERRORID, aid);
+  }}
+END_FUNCTION_BLOCK
+
+(* MC_ReadActualPosition (PLCopen TC2 Motion Control Part 1 v2.0, 2011, administrative FB; Enable FB):
+   Position = mc-axis.N.actual-position (pos-fb + the MC_SetPosition offset, axis frame — the same value
+   MC_MoveAbsolute and the soft limits use), read every scan while Enable. Valid/Busy follow Enable;
+   Error/ErrorID 1 only for an axis this program does not drive (as MC_ReadAxisError). Position keeps its last
+   value when Enable falls. *)
+FUNCTION_BLOCK MC_ReadActualPosition
+  VAR_IN_OUT Axis : AXIS_REF; END_VAR
+  VAR_INPUT Enable : BOOL; END_VAR
+  VAR_OUTPUT Valid : BOOL; Busy : BOOL; Error : BOOL; ErrorID : WORD; Position : REAL; END_VAR
+  {{
+    extern int iec_axis_position(int, IEC_REAL *);
+    IEC_BOOL en = GetFbVar(ENABLE), ok = 0; IEC_REAL pos = GetFbVar(POSITION);
+    if (en) ok = iec_axis_position(GetFbVar(AXIS, .AXISNO.value), &pos);
+    SetFbVar(VALID, en && ok); SetFbVar(BUSY, en && ok); SetFbVar(ERROR, en && !ok); SetFbVar(ERRORID, en && !ok ? 1 : 0);
+    SetFbVar(POSITION, pos);
   }}
 END_FUNCTION_BLOCK

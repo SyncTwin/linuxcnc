@@ -324,7 +324,8 @@ def render(p: Program, comp: str, thread: str = DEFAULT_THREAD, hooks: Hooks | N
                  f"pin in u32 ax{i}_failed_id;",
                  f"pin in bit ax{i}_busy;", f"pin in bit ax{i}_in_velocity;", f"pin in s32 ax{i}_error_id;"]
         pins += [f'pin out bit ax{i}_reset "{doc(f"ax{i}_reset", f"mc-axis.{i}.reset: held while MC_Reset.Execute")}";',
-                 f'pin in s32 ax{i}_axis_error_id "{doc(f"ax{i}_axis_error_id", f"mc-axis.{i}.axis-error-id: MC_ReadAxisError")}";']
+                 f'pin in s32 ax{i}_axis_error_id "{doc(f"ax{i}_axis_error_id", f"mc-axis.{i}.axis-error-id: MC_ReadAxisError")}";',
+                 f'pin in float ax{i}_actual_position "{doc(f"ax{i}_actual_position", f"mc-axis.{i}.actual-position: MC_ReadActualPosition")}";']
         if p.power:
             pins += [f'pin out bit ax{i}_power "{doc(f"ax{i}_power", "MC_Power.Enable while the program runs")}";',
                      f'pin in s32 ax{i}_state "mc-axis.{i}.state: MC_Power.Status (AxisState, 0 Disabled)";']
@@ -355,7 +356,7 @@ def render(p: Program, comp: str, thread: str = DEFAULT_THREAD, hooks: Hooks | N
                     f"iec_ax[{i}].in_vel = ax{i}_in_velocity; iec_ax[{i}].error_id = ax{i}_error_id;\n" for i in ax)
     if p.power:
         c_in += "".join(f"    iec_ax[{i}].state = ax{i}_state;\n" for i in ax)
-    c_in += "".join(f"    iec_ax[{i}].axis_error_id = ax{i}_axis_error_id;\n" for i in ax)
+    c_in += "".join(f"    iec_ax[{i}].axis_error_id = ax{i}_axis_error_id; iec_ax[{i}].act_pos = ax{i}_actual_position;\n" for i in ax)
     c_out = "".join(f"    iec_issue(&iec_ax[{i}]); ax{i}_execute_set(iec_ax[{i}].exec); ax{i}_halt_set(iec_ax[{i}].halt); "
                     f"ax{i}_mode_set(iec_ax[{i}].mode); ax{i}_position_set(iec_ax[{i}].pos); "
                     f"ax{i}_velocity_set(iec_ax[{i}].vel); ax{i}_acceleration_set(iec_ax[{i}].acc); "
@@ -404,7 +405,7 @@ IEC_UDINT iec_tick;
 {loc_decl}
 /* setpos: the pending command is MC_SetPosition (issued on `set`, mode 0/1 = absolute/relative) */
 struct iec_axis {{ int pend, exec, halt_pend, halt, mode, resume, reset_pend, reset, reset_hold, setpos, set; IEC_REAL pos, vel, acc, dec, jerk;
-                  IEC_UDINT *mv_owner, *halt_owner, *reset_owner;
+                  IEC_UDINT *mv_owner, *halt_owner, *reset_owner; IEC_REAL act_pos;
                   unsigned cmd_id, done_id, aborted_id, failed_id; int busy, in_vel, error_id, axis_error_id, power, state; }};
 static struct iec_axis iec_ax[{n_ax}];
 /* one C entry for MC_* (mc_plcopen.st): kind 0 abs, 1 rel, 2 velocity, 3 halt, 4 set position (v <> 0: relative),
@@ -451,6 +452,11 @@ int iec_axis_error(int a, IEC_WORD *aid) {{
     if (a < 0 || a >= {n_ax}) return 0;
     *aid = (IEC_WORD)iec_ax[a].axis_error_id; return 1;
 }}
+/* MC_ReadActualPosition: the axis's actual position (mc-axis.N.actual-position, read at the start of this period) */
+int iec_axis_position(int a, IEC_REAL *pos) {{
+    if (a < 0 || a >= {n_ax}) return 0;
+    *pos = iec_ax[a].act_pos; return 1;
+}}
 /* MC_Power: Enable -> axN-power, Status = axis not Disabled (AxisState 0) */
 int iec_axis_power(int a, IEC_BOOL en, IEC_BOOL *on) {{
     if (a < 0 || a >= {n_ax}) return 0;
@@ -488,6 +494,7 @@ FUNCTION(_) {{
             hal.append(f"net {comp}-ax{i}-{src} mc-axis.{i}.{src} => {inst}.ax{i}-{src}")
         hal.append(f"net {comp}-ax{i}-reset {inst}.ax{i}-reset => mc-axis.{i}.reset")
         hal.append(f"net {comp}-ax{i}-axis-error-id mc-axis.{i}.axis-error-id => {inst}.ax{i}-axis-error-id")
+        hal.append(f"net {comp}-ax{i}-actual-position mc-axis.{i}.actual-position => {inst}.ax{i}-actual-position")
         if h.axis_hal:
             hal += h.axis_hal(i)
         if p.power:
