@@ -39,6 +39,9 @@ Pins of the component (instance <comp>.0):
   knob-<name>            VAR_INPUT of the program (REAL/LREAL/INT/DINT/BOOL), default from the program text
   axN-*                  PLCopen MC_* function blocks (lib/iec/mc_plcopen.st) on axis N: wired to mc-axis.N
                          (mc_axis(9)); AXIS_REF variables of the program get AxisNo from the axes map.
+  axN-gear-*             MC_GearIn/MC_GearOut with slave N (only when the program calls them): to mc-gear.N
+                         (mc_gear(9)); render() does not net them — which axes are slaves is the configuration's
+                         (Hooks.axis_hal), an axis that is no slave has no mc-gear.N.
 __CURRENT_TIME (timers, step.T) is the sum of the thread period while the program runs.
 uspace loads components RTLD_GLOBAL, so every MATIEC symbol is under '#pragma GCC visibility push(hidden)':
 two programs in one HAL do not see each other's RES__INST0, iec_mc, __CURRENT_TIME.
@@ -209,6 +212,7 @@ class Program:
     init: dict[str, str]                        # initial values iec2c printed
     set_position: bool                          # the program calls MC_SetPosition
     power: bool                                 # the program calls MC_Power
+    gear: bool = False                          # the program calls MC_GearIn / MC_GearOut
     found: list[str] = field(default_factory=list)   # POU types of `programs` present in the C
 
 
@@ -245,7 +249,8 @@ def compile_program(st: str, axes: dict[str, int], period_ns: int, *, prelude: s
                    words=wloc, steps=steps, knobs=knobs,
                    init=dict(re.findall(r"__INIT_VAR\(data__->(\w+),(.*?),retain\)", body)),
                    set_position=bool(re.search(r"\bMC_SetPosition\b", plain, re.I)),
-                   power=bool(re.search(r"\bMC_Power\b", plain, re.I)), found=found)
+                   power=bool(re.search(r"\bMC_Power\b", plain, re.I)),
+                   gear=bool(re.search(r"\bMC_Gear(In|Out)\b", plain, re.I)), found=found)
 
 
 @dataclass
@@ -331,6 +336,15 @@ def render(p: Program, comp: str, thread: str = DEFAULT_THREAD, hooks: Hooks | N
                      f'pin in s32 ax{i}_state "mc-axis.{i}.state: MC_Power.Status (AxisState, 0 Disabled)";']
         if p.set_position:
             pins.append(f'pin out bit ax{i}_set_position "mc-axis.{i}.set-position: MC_SetPosition edge (mode 1 = relative)";')
+        if p.gear:
+            g = f"ax{i}_gear"
+            pins += [f'pin out bit {g}_in "mc-gear.{i}.gear-in: MC_GearIn edge";',
+                     f'pin out bit {g}_out "mc-gear.{i}.gear-out: MC_GearOut edge";',
+                     f"pin out s32 {g}_master_req;", f"pin out s32 {g}_ratio_num;", f"pin out u32 {g}_ratio_den;",
+                     f"pin out float {g}_acceleration;", f"pin out float {g}_deceleration;", f"pin out float {g}_jerk;",
+                     f"pin in u32 {g}_command_id;", f"pin in u32 {g}_done_id;", f"pin in u32 {g}_aborted_id;",
+                     f"pin in u32 {g}_failed_id;", f"pin in bit {g}_busy;", f"pin in bit {g}_in_gear;",
+                     f"pin in s32 {g}_error_id;"]
     n_ax = max(ax, default=-1) + 1 or 1
     loc_decl = "".join(f"static {t} loc_{k}X{a}_{b}; {t} *__{k}X{a}_{b} = &loc_{k}X{a}_{b};\n" for t, k, a, b, _v in loc)
     loc_decl += "".join(f"static {t} loc_{k}{s}{a}_{b}; {t} *__{k}{s}{a}_{b} = &loc_{k}{s}{a}_{b};\n"
@@ -357,6 +371,11 @@ def render(p: Program, comp: str, thread: str = DEFAULT_THREAD, hooks: Hooks | N
     if p.power:
         c_in += "".join(f"    iec_ax[{i}].state = ax{i}_state;\n" for i in ax)
     c_in += "".join(f"    iec_ax[{i}].axis_error_id = ax{i}_axis_error_id; iec_ax[{i}].act_pos = ax{i}_actual_position;\n" for i in ax)
+    if p.gear:   # mc-gear.N answers as mc-axis.N does (command numbers, busy, in-gear as in-velocity)
+        c_in += "".join(f"    iec_gr[{i}].cmd_id = ax{i}_gear_command_id; iec_gr[{i}].done_id = ax{i}_gear_done_id; "
+                        f"iec_gr[{i}].aborted_id = ax{i}_gear_aborted_id; iec_gr[{i}].failed_id = ax{i}_gear_failed_id; "
+                        f"iec_gr[{i}].busy = ax{i}_gear_busy; iec_gr[{i}].in_vel = ax{i}_gear_in_gear; "
+                        f"iec_gr[{i}].error_id = ax{i}_gear_error_id;\n" for i in ax)
     c_out = "".join(f"    iec_issue(&iec_ax[{i}]); ax{i}_execute_set(iec_ax[{i}].exec); ax{i}_halt_set(iec_ax[{i}].halt); "
                     f"ax{i}_mode_set(iec_ax[{i}].mode); ax{i}_position_set(iec_ax[{i}].pos); "
                     f"ax{i}_velocity_set(iec_ax[{i}].vel); ax{i}_acceleration_set(iec_ax[{i}].acc); "
@@ -367,6 +386,11 @@ def render(p: Program, comp: str, thread: str = DEFAULT_THREAD, hooks: Hooks | N
         c_out += "".join(f"    ax{i}_power_set(run && iec_ax[{i}].power);\n" for i in ax)
     if p.set_position:
         c_out += "".join(f"    ax{i}_set_position_set(iec_ax[{i}].set);\n" for i in ax)
+    if p.gear:   # GearIn rides the move path (exec, pos = num, vel = den), GearOut the halt path
+        c_out += "".join(f"    iec_issue(&iec_gr[{i}]); ax{i}_gear_in_set(iec_gr[{i}].exec); ax{i}_gear_out_set(iec_gr[{i}].halt); "
+                         f"ax{i}_gear_master_req_set(iec_gr[{i}].master); ax{i}_gear_ratio_num_set((int)iec_gr[{i}].pos); "
+                         f"ax{i}_gear_ratio_den_set((unsigned)iec_gr[{i}].vel); ax{i}_gear_acceleration_set(iec_gr[{i}].acc); "
+                         f"ax{i}_gear_deceleration_set(iec_gr[{i}].dec); ax{i}_gear_jerk_set(iec_gr[{i}].jerk);\n" for i in ax)
     c_out += "".join(f"    qx_{a}_{b}_set(run ? loc_QX{a}_{b} : qx_{a}_{b}_safe);\n" for _t, k, a, b, _v in loc if k == "Q")
     c_out += "".join(f"    q{s.lower()}_{a}_{b}_set(run ? loc_Q{s}{a}_{b} : q{s.lower()}_{a}_{b}_safe);\n"
                      for _t, k, s, a, b, _v in wloc if k == "Q")
@@ -406,8 +430,9 @@ IEC_UDINT iec_tick;
 /* setpos: the pending command is MC_SetPosition (issued on `set`, mode 0/1 = absolute/relative) */
 struct iec_axis {{ int pend, exec, halt_pend, halt, mode, resume, reset_pend, reset, reset_hold, setpos, set; IEC_REAL pos, vel, acc, dec, jerk;
                   IEC_UDINT *mv_owner, *halt_owner, *reset_owner; IEC_REAL act_pos;
-                  unsigned cmd_id, done_id, aborted_id, failed_id; int busy, in_vel, error_id, axis_error_id, power, state; }};
+                  unsigned cmd_id, done_id, aborted_id, failed_id; int busy, in_vel, error_id, axis_error_id, power, state, master; }};
 static struct iec_axis iec_ax[{n_ax}];
+static struct iec_axis iec_gr[{n_ax}];   /* mc-gear.N of slave N: the same command protocol as mc-axis.N */
 /* one C entry for MC_* (mc_plcopen.st): kind 0 abs, 1 rel, 2 velocity, 3 halt, 4 set position (v <> 0: relative),
    5 reset (the reset pin is held with Execute until the axis leaves ErrorStop). acc/dec/jerk of a move are latched
    with pos/vel on the edge and go to mc-axis.N as given (0 = axis default there). *act: Active (P1) — the instance
@@ -416,10 +441,9 @@ static struct iec_axis iec_ax[{n_ax}];
    (P1 § 2.4.1): 0 idle, 1 busy, 2 done, 3 error, 4 aborted, 5 busy + InVelocity, 6 busy, InVelocity given;
    Done/Error/CommandAborted/InVelocity stay while Execute is held, reset by its falling edge, one cycle when
    Execute fell before the end */
-void iec_mc(int a, int kind, int rise, int ex, IEC_REAL p, IEC_REAL v, IEC_REAL acc, IEC_REAL dec, IEC_REAL jerk,
-            IEC_UDINT *id, IEC_USINT *st, IEC_BOOL *done, IEC_BOOL *busy, IEC_BOOL *err, IEC_WORD *eid, IEC_BOOL *inv,
-            IEC_BOOL *abt, IEC_BOOL *act) {{
-    struct iec_axis *x = a >= 0 && a < {n_ax} ? &iec_ax[a] : 0;
+static void iec_cmd(struct iec_axis *x, int kind, int rise, int ex, IEC_REAL p, IEC_REAL v, IEC_REAL acc, IEC_REAL dec,
+                    IEC_REAL jerk, IEC_UDINT *id, IEC_USINT *st, IEC_BOOL *done, IEC_BOOL *busy, IEC_BOOL *err, IEC_WORD *eid,
+                    IEC_BOOL *inv, IEC_BOOL *abt, IEC_BOOL *act) {{
     int s = *st, pend, d, e, ab;
     if (rise) {{
         s = 1; *eid = 0;
@@ -447,6 +471,20 @@ void iec_mc(int a, int kind, int rise, int ex, IEC_REAL p, IEC_REAL v, IEC_REAL 
     *st = s; *busy = s == 1 || s == 5 || s == 6; *done = s == 2; *err = s == 3; *abt = s == 4; *inv = s == 5;
     *act = x && *busy && *id && x->cmd_id == *id && x->busy;
     if (s != 3) *eid = 0;
+}}
+void iec_mc(int a, int kind, int rise, int ex, IEC_REAL p, IEC_REAL v, IEC_REAL acc, IEC_REAL dec, IEC_REAL jerk,
+            IEC_UDINT *id, IEC_USINT *st, IEC_BOOL *done, IEC_BOOL *busy, IEC_BOOL *err, IEC_WORD *eid, IEC_BOOL *inv,
+            IEC_BOOL *abt, IEC_BOOL *act) {{
+    iec_cmd(a >= 0 && a < {n_ax} ? &iec_ax[a] : 0, kind, rise, ex, p, v, acc, dec, jerk, id, st, done, busy, err, eid, inv, abt, act);
+}}
+/* MC_GearIn (kind 2: Busy until aborted, InGear as InVelocity; num/den ride pos/vel, Master latched on the edge) and
+   MC_GearOut (kind 3: Done) on mc-gear.S of slave S */
+void iec_gear(int sl, int m, int kind, int rise, int ex, IEC_REAL num, IEC_REAL den, IEC_REAL acc, IEC_REAL dec, IEC_REAL jerk,
+              IEC_UDINT *id, IEC_USINT *st, IEC_BOOL *done, IEC_BOOL *busy, IEC_BOOL *err, IEC_WORD *eid, IEC_BOOL *ingear,
+              IEC_BOOL *abt, IEC_BOOL *act) {{
+    struct iec_axis *x = sl >= 0 && sl < {n_ax} ? &iec_gr[sl] : 0;
+    if (x && rise && kind == 2) x->master = m;
+    iec_cmd(x, kind, rise, ex, num, den, acc, dec, jerk, id, st, done, busy, err, eid, ingear, abt, act);
 }}
 int iec_axis_error(int a, IEC_WORD *aid) {{
     if (a < 0 || a >= {n_ax}) return 0;

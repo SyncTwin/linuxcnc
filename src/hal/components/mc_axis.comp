@@ -230,6 +230,7 @@ pin out uint aborted_id "number of the last command aborted by another command o
 pin out uint failed_id "number of the last command refused or ended by an axis error (Error)";
 pin out real ferror "pos-cmd minus pos-fb";
 pin out real actual_position "MC_ReadActualPosition: pos-fb + the MC_SetPosition offset (axis frame)";
+pin out real commanded_position "MC_ReadParameter CommandedPosition (Part 1 parameter 1): pos-cmd + the MC_SetPosition offset (axis frame); mcSetValue of a master (mc_gear)";
 pin out real torque_fb "MC_ReadActualTorque: per mille of rated torque";
 pin out real velocity_fb "MC_ReadActualVelocity: machine units/s";
 pin out uint statusword "drive statusword 0x6041 as read";
@@ -741,6 +742,7 @@ FUNCTION(_) {
     axis_error_id_set(err_latched);
 
     actual_position_set(pos_fb + off);
+    commanded_position_set(pos_cmd + off);
     if (probe_1_seq != probe1_old) {   /* snapshot at the latch: a later MC_SetPosition does not move it */
         probe1_old = probe_1_seq;
         probe_1_recorded_position_set(probe_1_pos + off);

@@ -186,3 +186,49 @@ FUNCTION_BLOCK MC_ReadActualPosition
     SetFbVar(POSITION, pos);
   }}
 END_FUNCTION_BLOCK
+
+(* MC_GearIn (P1 § 4.5 p. 94): Slave runs at RatioNumerator / RatioDenominator x Master (mc-gear.<Slave>, mc_gear(9)).
+   The slave ramps in with Acceleration/Deceleration/Jerk (0 = the slave's maxa / = Acceleration / none), the distance
+   lost ramping is not caught up (note 1); InGear when coupled; a new GearIn changes the ratio on the fly (note 2).
+   Busy stays while geared (as MC_MoveVelocity after InVelocity) until MC_GearOut, another GearIn or MC_Stop of the
+   slave (CommandAborted). From Standstill of the slave only (mc_axis), elsewhere Error 2. Master must be the axis the
+   configuration wired to mc-gear.<Slave>.master-pos, else Error 11. MasterValueSource and BufferMode are not inputs:
+   the source is the wiring (commanded or actual position), the buffer mode mcAborting. *)
+FUNCTION_BLOCK MC_GearIn
+  VAR_IN_OUT Master : AXIS_REF; Slave : AXIS_REF; END_VAR
+  VAR_INPUT Execute : BOOL; RatioNumerator : INT := 1; RatioDenominator : UINT := 1;
+            Acceleration : REAL; Deceleration : REAL; Jerk : REAL; END_VAR
+  VAR_OUTPUT InGear : BOOL; Busy : BOOL; Active : BOOL; CommandAborted : BOOL; Error : BOOL; ErrorID : WORD; END_VAR
+  VAR Prev : BOOL; Id : UDINT; St : USINT; LastTick : UDINT; END_VAR
+  {{
+    extern IEC_UDINT iec_tick;
+    extern void iec_gear(int, int, int, int, int, IEC_REAL, IEC_REAL, IEC_REAL, IEC_REAL, IEC_REAL, IEC_UDINT *, IEC_USINT *,
+                         IEC_BOOL *, IEC_BOOL *, IEC_BOOL *, IEC_WORD *, IEC_BOOL *, IEC_BOOL *, IEC_BOOL *);
+    IEC_BOOL ex = GetFbVar(EXECUTE), nil = 0;
+    IEC_BOOL rise = ex && !(GetFbVar(PREV) && GetFbVar(LASTTICK) + 1 == iec_tick);
+    iec_gear(GetFbVar(SLAVE, .AXISNO.value), GetFbVar(MASTER, .AXISNO.value), 2, rise, ex,
+             GetFbVar(RATIONUMERATOR), GetFbVar(RATIODENOMINATOR), GetFbVar(ACCELERATION), GetFbVar(DECELERATION), GetFbVar(JERK),
+             &GetFbVar(ID), &GetFbVar(ST), &nil, &GetFbVar(BUSY), &GetFbVar(ERROR), &GetFbVar(ERRORID), &GetFbVar(INGEAR),
+             &GetFbVar(COMMANDABORTED), &GetFbVar(ACTIVE));
+    SetFbVar(PREV, ex); SetFbVar(LASTTICK, iec_tick);
+  }}
+END_FUNCTION_BLOCK
+
+(* MC_GearOut (P1 § 4.6 p. 96): the slave leaves the gear; Done in the period the gear lets go. Deviation: the slave
+   decelerates to Standstill at its maxa (mc_axis), not ContinuousMotion at its last velocity. Not geared: Error 2. *)
+FUNCTION_BLOCK MC_GearOut
+  VAR_IN_OUT Slave : AXIS_REF; END_VAR
+  VAR_INPUT Execute : BOOL; END_VAR
+  VAR_OUTPUT Done : BOOL; Busy : BOOL; Error : BOOL; ErrorID : WORD; END_VAR
+  VAR Prev : BOOL; Id : UDINT; St : USINT; LastTick : UDINT; END_VAR
+  {{
+    extern IEC_UDINT iec_tick;
+    extern void iec_gear(int, int, int, int, int, IEC_REAL, IEC_REAL, IEC_REAL, IEC_REAL, IEC_REAL, IEC_UDINT *, IEC_USINT *,
+                         IEC_BOOL *, IEC_BOOL *, IEC_BOOL *, IEC_WORD *, IEC_BOOL *, IEC_BOOL *, IEC_BOOL *);
+    IEC_BOOL ex = GetFbVar(EXECUTE), nil = 0;
+    IEC_BOOL rise = ex && !(GetFbVar(PREV) && GetFbVar(LASTTICK) + 1 == iec_tick);
+    iec_gear(GetFbVar(SLAVE, .AXISNO.value), -1, 3, rise, ex, 0, 0, 0, 0, 0,
+             &GetFbVar(ID), &GetFbVar(ST), &GetFbVar(DONE), &GetFbVar(BUSY), &GetFbVar(ERROR), &GetFbVar(ERRORID), &nil, &nil, &nil);
+    SetFbVar(PREV, ex); SetFbVar(LASTTICK, iec_tick);
+  }}
+END_FUNCTION_BLOCK
