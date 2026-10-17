@@ -8,11 +8,14 @@
 *   thread drains the ring and publishes. The task loop never waits on NATS:
 *   a full ring counts a drop and the change is retried on the next cycle.
 *
-*   Config: INI [NATS] URL, GROUP, NODE (PUBLISH_PERIOD optional, default
-*   [TASK] CYCLE_TIME). No URL - publishing off, said once in the log.
-*   [NATS] PINS = <file> (optional, relative to the INI's folder): HAL pins /
-*   signals (device hal) and a sampler FIFO (device scope) in the hal2spb.conf
-*   line format - see tasknats.cc. Read in the publisher's threads only.
+*   The node (connection, births, Rebirth, devices hal and scope) is the
+*   halnats library (hal/utils/halnats/halnats.hh) - the same code as the
+*   halnats binary of VMs without LinuxCNC; the task adds its status devices.
+*   Config: the VM environment SYNCTWIN_NATS_URL/USER/PASS, SYNCTWIN_BOX_ID
+*   (group), NODE_ID + "-task" (node); INI [NATS] URL USER PASS GROUP NODE
+*   override, PUBLISH_PERIOD optional (default [TASK] CYCLE_TIME), PINS = <file>
+*   (relative to the INI's folder) - devices hal / scope. No URL - publishing
+*   off, said once in the log.
 *
 * License: GPL Version 2
 * Copyright (c) 2026 SyncTwin Technologies

@@ -185,7 +185,7 @@ SUBDIRS := \
     \
     hal/components hal/drivers \
     hal/user_comps/devices hal/user_comps/mb2hal \
-    hal/user_comps hal/user_comps/vismach hal/user_comps/vfs11_vfd hal/classicladder hal/utils hal \
+    hal/user_comps hal/user_comps/vismach hal/user_comps/vfs11_vfd hal/classicladder hal/utils hal/utils/halnats hal \
     hal/user_comps/vfdb_vfd hal/user_comps/wj200_vfd \
     hal/user_comps/pi500_vfd \
     hal/user_comps/huanyang-vfd \

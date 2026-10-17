@@ -26,21 +26,13 @@ MILLTASKSRCS := \
 	emc/usr_intf/mapini.cc \
 	emc/task/tasknats.cc
 
-# Status -> NATS (Sparkplug B). With libnats the Sparkplug schema is the one
-# shared with hal2spb (configure --with-sparkplug-proto=FILE), compiled here by
-# protoc-c; without it tasknats.cc builds its "off" stub.
+# Status -> NATS (Sparkplug B): the node is the halnats library
+# (hal/utils/halnats/Submakefile); without libnats tasknats.cc builds its "off" stub.
 ifdef HAVE_LIBNATS
-SPB_GEN := objects/spb
-$(SPB_GEN)/sparkplug_b_payload.pb-c.c $(SPB_GEN)/sparkplug_b_payload.pb-c.h: $(SPARKPLUG_PROTO)
-	$(ECHO) Generating Sparkplug B protobuf-c from $(notdir $<)
-	@mkdir -p $(SPB_GEN)
-	$(Q)cp $< $(SPB_GEN)/sparkplug_b_payload.proto
-	$(Q)cd $(SPB_GEN) && $(PROTOC_C) --c_out=. sparkplug_b_payload.proto
-MILLTASKSRCS += $(SPB_GEN)/sparkplug_b_payload.pb-c.c
 objects/emc/task/tasknats.o: $(SPB_GEN)/sparkplug_b_payload.pb-c.h
-objects/emc/task/tasknats.o: EXTRAFLAGS += -I$(SPB_GEN) $(LIBNATS_CFLAGS) $(PROTOBUFC_CFLAGS)
-objects/$(SPB_GEN)/sparkplug_b_payload.pb-c.o: EXTRAFLAGS += $(PROTOBUFC_CFLAGS)
-MILLTASK_NATS_LIBS := $(LIBNATS_LIBS) $(PROTOBUFC_LIBS)
+objects/emc/task/tasknats.o: EXTRAFLAGS += $(HALNATS_CFLAGS)
+MILLTASK_NATS_LIBS := ../lib/libhalnats.a $(HALNATS_LIBS)
+../bin/milltask: ../lib/libhalnats.a
 endif
 
 USERSRCS += $(MILLTASKSRCS)
