@@ -89,6 +89,8 @@ uint64_t hal_alias0 = 0, scope_alias0 = 0;      // after the owner's 1..N
 std::mutex mx;
 natsConnection *nc = nullptr;
 natsSubscription *snap_sub = nullptr, *ncmd_sub = nullptr, *dcmd_sub = nullptr;
+std::vector<natsSubscription *> own_dcmd_subs;   // DCMD of the owner devices that take commands
+std::vector<size_t> own_dcmd_dev;                // closure of each: the device index (stable storage)
 std::thread pub_thread, scope_thread;
 std::atomic<bool> running{false}, need_birth{false};
 bool enabled = false;
@@ -396,6 +398,27 @@ void on_dcmd(natsConnection *, natsSubscription *, natsMsg *msg, void *)
         else { q.qtype = HAL_QTYPE_PIN; q.pp.type = c.p->type; q.pp.value = c.v; rc = hal_set_p(&q, nullptr, nullptr); }
         if (rc) say(true, "%s: NATS DCMD hal %s -> %s: %s\n", tag(), c.p->metric.c_str(), c.p->src.c_str(), hal_err(rc));
     }
+}
+
+// DCMD of an owner device: handed to the owner as is (it checks and queues; never under mx)
+void on_own_dcmd(natsConnection *, natsSubscription *, natsMsg *msg, void *closure)
+{
+    size_t d = *(const size_t *)closure;
+    Payload *pl = sparkplug_b__payload__unpack(nullptr, (size_t)natsMsg_GetDataLength(msg),
+                                               (const uint8_t *)natsMsg_GetData(msg));
+    natsMsg_Destroy(msg);
+    if (!pl) { say(true, "%s: NATS DCMD %s refused: not a Sparkplug B payload\n", tag(), own->devices()[d].c_str()); return; }
+    own->command(d, pl);
+    sparkplug_b__payload__free_unpacked(pl, nullptr);
+}
+
+void destroy_subs()
+{
+    natsSubscription_Destroy(snap_sub); snap_sub = nullptr;
+    natsSubscription_Destroy(ncmd_sub); ncmd_sub = nullptr;
+    natsSubscription_Destroy(dcmd_sub); dcmd_sub = nullptr;
+    for (natsSubscription *&s : own_dcmd_subs) { natsSubscription_Destroy(s); s = nullptr; }
+    own_dcmd_subs.clear();
 }
 
 // NCMD: "Node Control/Rebirth" only (HAL commands are DCMD of device hal)
@@ -745,12 +768,21 @@ int start(const Config &c, int hal_comp_id, Owner *owner)
     bool has_out = false;
     for (const HPin &p : hpins) has_out = has_out || p.out;
     if (st == NATS_OK && has_out) st = natsConnection_Subscribe(&dcmd_sub, nc, s_dcmd_hal.c_str(), on_dcmd, nullptr);
+    std::string own_cmds;
+    if (own) {
+        own_dcmd_dev.clear();
+        for (size_t d = 0; d < own->devices().size(); d++) if (own->takes_commands(d)) own_dcmd_dev.push_back(d);
+        own_dcmd_subs.assign(own_dcmd_dev.size(), nullptr);
+        for (size_t k = 0; k < own_dcmd_dev.size() && st == NATS_OK; k++) {
+            std::string subj = base + "DCMD." + cfg.node + "." + own->devices()[own_dcmd_dev[k]];
+            st = natsConnection_Subscribe(&own_dcmd_subs[k], nc, subj.c_str(), on_own_dcmd, &own_dcmd_dev[k]);
+            own_cmds += (own_cmds.empty() ? "" : ", ") + subj;
+        }
+    }
     natsOptions_Destroy(opts);
     if (st != NATS_OK) {
         say(true, "%s: NATS %s: %s - publishing refused\n", tag(), cfg.url.c_str(), natsStatus_GetText(st));
-        natsSubscription_Destroy(snap_sub); snap_sub = nullptr;
-        natsSubscription_Destroy(ncmd_sub); ncmd_sub = nullptr;
-        natsSubscription_Destroy(dcmd_sub); dcmd_sub = nullptr;
+        destroy_subs();
         natsConnection_Destroy(nc); nc = nullptr;
         return -1;
     }
@@ -762,6 +794,7 @@ int start(const Config &c, int hal_comp_id, Owner *owner)
     for (const HPin &p : hpins)
         if (p.out) say(false, "%s: NATS hal out %s (%s %s) <- %s\n", tag(), p.metric.c_str(), p.sig ? "signal" : "pin",
                        p.src.c_str(), s_dcmd_hal.c_str());
+    if (!own_cmds.empty()) say(false, "%s: NATS commands <- %s\n", tag(), own_cmds.c_str());
     say(false, "%s: NATS %s%s as Sparkplug node %s/%s, %zu own metrics, %zu hal, %zu scope columns, snapshot on %s\n",
         tag(), cfg.url.c_str(), cfg.user.empty() ? "" : " (user)", cfg.group.c_str(), cfg.node.c_str(),
         own ? own->aliases() : (size_t)0, hpins.size(), scols.size(), s_snapshot.c_str());
@@ -786,9 +819,7 @@ void stop()
             natsConnection_FlushTimeout(nc, 1000);
         }
     }
-    natsSubscription_Destroy(snap_sub); snap_sub = nullptr;
-    natsSubscription_Destroy(ncmd_sub); ncmd_sub = nullptr;
-    natsSubscription_Destroy(dcmd_sub); dcmd_sub = nullptr;
+    destroy_subs();
     natsConnection_Destroy(nc); nc = nullptr;
 }
 

@@ -41,19 +41,26 @@ int taskNatsInit(const char *inifile, int, double, int)
 }
 void taskNatsCycle(const EMC_STAT *) {}
 void taskNatsShutdown(void) {}
+RCS_CMD_MSG *taskNatsCommand(void) { return nullptr; }
+void taskNatsMessage(int, const char *) {}
 
 #else
 
 #include <atomic>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
+#include <cmath>
+#include <limits.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 
 #include <inifile.hh>
 #include "halnats.hh"
+#include <rtapi_string.h>                        // rtapi_strlcpy()
 #include "nml_intf/emc.hh"
 #include "nml_intf/emc_nml.hh"
 
@@ -278,6 +285,210 @@ void build_defs(int joints, int spindles)
     }
 }
 
+// ---- commands: DCMD of task / motion -> the task loop (second source next to NML) ----
+//
+// The NATS delivery threads (one per device) parse a DCMD into NML messages - the very messages
+// the Python linuxcnc.command builds - and push it into a lock-free ring (producers serialized by
+// cmx, the task loop pops without a lock). The task takes ONE message per cycle, only in a cycle
+// in which NML brought nothing new, and plans it exactly like an NML command (emcTaskPlan: every
+// state / mode / interlock check of NML applies; nothing is bypassed).
+// Serial: the sender's cmd/serial must grow (a repeat or an old one is refused - a resend is
+// harmless); inside the task the message carries a NEGATIVE serial of its own, so it can never
+// equal an NML serial (NML write ids are positive) and the planner's "new command" test
+// (serial != echo) stays exact across the two sources.
+
+struct NCmd {
+    int64_t serial = 0;                          // the sender's cmd/serial
+    std::vector<std::unique_ptr<RCS_CMD_MSG>> msgs;  // program/open = CLOSE + OPEN
+    std::string refused;                         // non-empty: answered RCS_ERROR, nothing planned
+};
+
+const size_t CMD_RING = 64;                      // ПРЕДПОЛОЖЕНИЕ, не замер: 64 commands queued ahead of the task
+NCmd *cring[CMD_RING];
+std::atomic<size_t> c_head{0}, c_tail{0};
+std::mutex cmx;                                  // producers only (NATS delivery threads)
+int64_t c_last_serial = INT64_MIN;               // under cmx: the last accepted cmd/serial
+bool c_enabled = false;
+
+// task thread: the command being planned / answered
+std::unique_ptr<NCmd> c_cur;
+size_t c_next = 0;                               // next message of c_cur to hand out
+int c_internal = 0;                              // the negative serial counter
+int c_cur_internal = 0;                          // the internal serial of c_cur's last handed message
+int c_rep_state = -1;                            // the last answered state of c_cur (-1 = none yet)
+int c_status_seen = -1;                          // emcStatus->status at the end of the last cycle
+std::string c_err;                               // the operator errors raised while c_cur runs
+
+// ---- events: answers and operator messages -> device task (lock-free ring, producer lock emx) ----
+enum EvKind { EV_CMD, EV_ERROR, EV_TEXT, EV_DISPLAY };
+struct Event {
+    uint8_t kind;
+    int32_t state;                               // EV_CMD: RCS_STATUS (DONE 1, EXEC 2, ERROR 3)
+    int64_t serial;                              // EV_CMD: the sender's cmd/serial
+    uint64_t ts_ms;
+    char text[LINELEN];                          // EV_CMD: the error, else the message
+};
+const size_t EV_RING = 256;                      // ПРЕДПОЛОЖЕНИЕ, не замер: 256 events between two publishes
+Event ering[EV_RING];
+std::atomic<size_t> e_head{0}, e_tail{0};
+std::mutex emx;                                  // producers (task thread; serialized for safety)
+std::atomic<uint64_t> e_dropped{0};
+uint64_t e_dropped_said = 0;
+
+// publisher side (under the node's lock): events taken by pull, sent by data, last values for births
+std::vector<Event> e_pending;
+Event e_last_cmd{}, e_last_msg[3]{};
+uint64_t ev_alias0 = 0;                          // aliases: status, strings, then the 6 event metrics
+enum { EA_SERIAL, EA_STATE, EA_CMDERR, EA_ERROR, EA_TEXT, EA_DISPLAY, EA_N };
+const char *const ev_name[EA_N] = {"cmd/serial", "cmd/state", "cmd/error",
+                                   "operator/error", "operator/text", "operator/display"};
+
+void push_event(uint8_t kind, int64_t serial, int32_t state, const char *text)
+{
+    std::lock_guard<std::mutex> g(emx);          // uncontended: the task thread is the producer
+    size_t h = e_head.load(std::memory_order_relaxed);
+    if (h - e_tail.load(std::memory_order_acquire) >= EV_RING) { e_dropped.fetch_add(1); return; }
+    Event &e = ering[h % EV_RING];
+    e.kind = kind; e.serial = serial; e.state = state; e.ts_ms = halnats::now_ms();
+    snprintf(e.text, sizeof e.text, "%s", text ? text : "");
+    e_head.store(h + 1, std::memory_order_release);
+}
+
+bool metric_int(const Metric *m, int64_t &v)
+{
+    if (m->value_case == HN_V(INT_VALUE)) {
+        bool u = m->has_datatype && m->datatype >= DT_(UInt8) && m->datatype <= DT_(UInt32);
+        v = u ? (int64_t)m->int_value : (int64_t)(int32_t)m->int_value; return true;
+    }
+    if (m->value_case == HN_V(LONG_VALUE)) { v = (int64_t)m->long_value; return true; }
+    return false;
+}
+bool metric_real(const Metric *m, double &v)
+{
+    int64_t i;
+    if (m->value_case == HN_V(DOUBLE_VALUE)) { v = m->double_value; return std::isfinite(v); }
+    if (m->value_case == HN_V(FLOAT_VALUE)) { v = m->float_value; return std::isfinite(v); }
+    if (metric_int(m, i)) { v = (double)i; return true; }
+    return false;
+}
+bool metric_true(const Metric *m) { return m->value_case == HN_V(BOOLEAN_VALUE) && m->boolean_value; }
+
+// One DCMD -> NCmd. Device task: state | mode | mdi | program/open | program/run | program/pause |
+// program/resume | program/step | abort; device motion: home | unhome | teleop | jog/stop |
+// jog/continuous | jog/increment (+ jog/joint, jog/velocity, jog/distance). Exactly one verb + cmd/serial.
+// The values and the checks are the Python linuxcnc.command's (emcmodule.cc), nothing more.
+std::string parse_cmd(size_t dev, const SparkplugB__Payload *pl, NCmd &c, bool &has_serial)
+{
+    const Metric *verb = nullptr, *jj = nullptr, *jv = nullptr, *jd = nullptr;
+    has_serial = false;
+    for (size_t n = 0; n < pl->n_metrics; n++) {
+        const Metric *m = pl->metrics[n];
+        if (!m->name) return "metrics by name only (alias without birth of commands)";
+        std::string nm = m->name;
+        if (nm == "cmd/serial") { if (!metric_int(m, c.serial)) return "cmd/serial: integer"; has_serial = true; }
+        else if (dev == D_MOTION && nm == "jog/joint") jj = m;
+        else if (dev == D_MOTION && nm == "jog/velocity") jv = m;
+        else if (dev == D_MOTION && nm == "jog/distance") jd = m;
+        else if (verb) return "one command per DCMD (" + std::string(verb->name) + " and " + nm + ")";
+        else verb = m;
+    }
+    if (!has_serial) return "no cmd/serial";
+    if (!verb) return "no command";
+    std::string v = verb->name;
+    int64_t i = 0;
+    const char *str = verb->value_case == HN_V(STRING_VALUE) ? verb->string_value : nullptr;
+    auto put = [&](RCS_CMD_MSG *m) { c.msgs.emplace_back(m); };
+    if (dev == D_TASK) {
+        if (v == "state") {
+            if (!metric_int(verb, i) || i < (int)EMC_TASK_STATE::ESTOP || i > (int)EMC_TASK_STATE::ON)
+                return "state: 1 ESTOP | 2 ESTOP_RESET | 3 OFF | 4 ON";
+            auto *m = new EMC_TASK_SET_STATE; m->state = (EMC_TASK_STATE)i; put(m);
+        } else if (v == "mode") {
+            if (!metric_int(verb, i) || i < (int)EMC_TASK_MODE::MANUAL || i > (int)EMC_TASK_MODE::MDI)
+                return "mode: 1 MANUAL | 2 AUTO | 3 MDI";
+            auto *m = new EMC_TASK_SET_MODE; m->mode = (EMC_TASK_MODE)i; put(m);
+        } else if (v == "mdi") {
+            auto *m = new EMC_TASK_PLAN_EXECUTE;
+            if (!str || strlen(str) > sizeof(m->command) - 1) { delete m; return "mdi: a string under " + std::to_string(sizeof(m->command)) + " chars"; }
+            rtapi_strlcpy(m->command, str, sizeof(m->command)); put(m);
+        } else if (v == "program/open") {
+            auto *m = new EMC_TASK_PLAN_OPEN;
+            if (!str || !*str || strlen(str) > sizeof(m->file) - 1) { delete m; return "program/open: a file path under " + std::to_string(sizeof(m->file)) + " chars"; }
+            rtapi_strlcpy(m->file, str, sizeof(m->file));
+            m->remote_buffersize = 0; m->remote_filesize = 0;      // the file is local to the task
+            put(new EMC_TASK_PLAN_CLOSE); put(m);
+        } else if (v == "program/run") {
+            if (!metric_int(verb, i) || i < 0 || i > INT_MAX) return "program/run: the start line (0 = from the top)";
+            auto *m = new EMC_TASK_PLAN_RUN; m->line = (int)i; put(m);
+        } else if (v == "program/pause") { if (!metric_true(verb)) return v + ": Boolean true"; put(new EMC_TASK_PLAN_PAUSE); }
+        else if (v == "program/resume") { if (!metric_true(verb)) return v + ": Boolean true"; put(new EMC_TASK_PLAN_RESUME); }
+        else if (v == "program/step") { if (!metric_true(verb)) return v + ": Boolean true"; put(new EMC_TASK_PLAN_STEP); }
+        else if (v == "abort") { if (!metric_true(verb)) return v + ": Boolean true"; put(new EMC_TASK_ABORT); }
+        else return "unknown command of device task: " + v;
+        return "";
+    }
+    // motion
+    if (v == "home" || v == "unhome") {
+        if (!metric_int(verb, i) || i < -1 || i >= EMCMOT_MAX_JOINTS) return v + ": joint index, -1 = all";
+        if (v == "home") { auto *m = new EMC_JOINT_HOME; m->joint = (int)i; put(m); }
+        else { auto *m = new EMC_JOINT_UNHOME; m->joint = (int)i; put(m); }
+    } else if (v == "teleop") {
+        if (verb->value_case != HN_V(BOOLEAN_VALUE)) return "teleop: Boolean";
+        auto *m = new EMC_TRAJ_SET_TELEOP_ENABLE; m->enable = verb->boolean_value ? 1 : 0; put(m);
+    } else if (v == "jog/stop" || v == "jog/continuous" || v == "jog/increment") {
+        if (!metric_int(verb, i) || i < 0 || i >= EMCMOT_MAX_JOINTS) return v + ": joint or axis index";
+        if (!jj || jj->value_case != HN_V(BOOLEAN_VALUE)) return v + ": jog/joint Boolean (true = joint, false = axis)";
+        int jm = jj->boolean_value ? 1 : 0;
+        double vel = 0, inc = 0;
+        if (v != "jog/stop" && (!jv || !metric_real(jv, vel))) return v + ": jog/velocity";
+        if (v == "jog/increment" && (!jd || !metric_real(jd, inc))) return v + ": jog/distance";
+        if (v == "jog/stop") { auto *m = new EMC_JOG_STOP; m->joint_or_axis = (int)i; m->jjogmode = jm; put(m); }
+        else if (v == "jog/continuous") { auto *m = new EMC_JOG_CONT; m->joint_or_axis = (int)i; m->vel = vel; m->jjogmode = jm; put(m); }
+        else { auto *m = new EMC_JOG_INCR; m->joint_or_axis = (int)i; m->vel = vel; m->incr = inc; m->jjogmode = jm; put(m); }
+    } else return "unknown command of device motion: " + v;
+    return "";
+}
+
+void on_command(size_t dev, const SparkplugB__Payload *pl)
+{
+    std::unique_ptr<NCmd> c(new NCmd);
+    bool has_serial = false;
+    std::string bad = parse_cmd(dev, pl, *c, has_serial);
+    std::lock_guard<std::mutex> g(cmx);
+    if (bad.empty() && c->serial <= c_last_serial)
+        bad = "cmd/serial " + std::to_string(c->serial) + " not after " + std::to_string(c_last_serial) + " (repeat ignored)";
+    if (!bad.empty()) {
+        c->msgs.clear();
+        c->refused = bad;
+        rcs_print_error("task: NATS DCMD %s refused: %s\n", dev_names[dev].c_str(), bad.c_str());
+        if (!has_serial) return;                 // nothing to answer to
+    } else c_last_serial = c->serial;
+    size_t h = c_head.load(std::memory_order_relaxed);
+    if (h - c_tail.load(std::memory_order_acquire) >= CMD_RING) {
+        rcs_print_error("task: NATS DCMD %s cmd/serial %lld dropped: %zu commands queued, the task is not taking them\n",
+                        dev_names[dev].c_str(), (long long)c->serial, CMD_RING);
+        return;
+    }
+    cring[h % CMD_RING] = c.release();
+    c_head.store(h + 1, std::memory_order_release);
+}
+
+// task thread, end of cycle: the answer of the command in hand, on change only
+void answer_cycle(const EMC_STAT *stat)
+{
+    c_status_seen = (int)stat->status;
+    if (!c_cur || !c_cur->refused.empty()) return;
+    // DONE / ERROR is the command's last answer: a later error of the machine is not this command's
+    if (c_rep_state == (int)RCS_STATUS::DONE || c_rep_state == (int)RCS_STATUS::ERROR) return;
+    int st;
+    if (stat->echo_serial_number != c_cur_internal) st = c_rep_state;   // superseded (NML): the last answer stands
+    else if (c_next < c_cur->msgs.size()) st = stat->status == RCS_STATUS::ERROR ? (int)RCS_STATUS::ERROR : (int)RCS_STATUS::EXEC;
+    else st = (int)stat->status;
+    if (st == c_rep_state || st < 0) return;
+    c_rep_state = st;
+    push_event(EV_CMD, c_cur->serial, st, st == (int)RCS_STATUS::ERROR ? c_err.c_str() : "");
+}
+
 // ---- the status devices as the node's owner (publisher thread, under the node's lock) ----
 
 void status_metric(Batch &b, size_t i, bool named, bool prefixed)
@@ -293,8 +504,27 @@ void str_metric(Batch &b, size_t k, bool named, bool prefixed)
     m.value_case = HN_V(STRING_VALUE); m.string_value = (char *)smirror[k].c_str();
 }
 
+void ev_metric(Batch &b, int k, const Event &e, bool named, bool prefixed)
+{
+    std::string n = named ? (prefixed ? std::string("task/") + ev_name[k] : std::string(ev_name[k])) : std::string();
+    uint32_t dt = k == EA_SERIAL ? DT_(Int64) : k == EA_STATE ? DT_(Int32) : DT_(String);
+    Metric &m = b.add(n, ev_alias0 + k, named ? dt : 0, e.ts_ms);
+    if (k == EA_SERIAL) halnats::set_value(&m, dt, I(e.serial));
+    else if (k == EA_STATE) halnats::set_value(&m, dt, I(e.state));
+    else { m.value_case = HN_V(STRING_VALUE); m.string_value = (char *)e.text; }
+}
+void ev_last_all(Batch &b, bool named, bool prefixed)
+{
+    ev_metric(b, EA_SERIAL, e_last_cmd, named, prefixed);
+    ev_metric(b, EA_STATE, e_last_cmd, named, prefixed);
+    ev_metric(b, EA_CMDERR, e_last_cmd, named, prefixed);
+    for (int k = 0; k < 3; k++) ev_metric(b, EA_ERROR + k, e_last_msg[k], named, prefixed);
+}
+
 struct TaskStatus : halnats::Owner {
-    size_t aliases() const override { return defs.size() + sdefs.size(); }
+    size_t aliases() const override { return defs.size() + sdefs.size() + EA_N; }
+    bool takes_commands(size_t d) const override { return d == D_TASK || d == D_MOTION; }
+    void command(size_t d, const SparkplugB__Payload *pl) override { on_command(d, pl); }
     const std::vector<std::string> &devices() const override { return dev_names; }
     void pull() override
     {
@@ -312,6 +542,15 @@ struct TaskStatus : halnats::Owner {
                     smirror[k].swap(sslot[k]); smirror_ts[k] = sslot_ts[k];
                     smirror_ok[k] = 1; sdirty[k] = 1; sslot_new[k] = 0;
                 }
+        }
+        take_events();                           // the last batch is sent: its events become the last values
+        size_t et = e_tail.load(std::memory_order_relaxed), eh = e_head.load(std::memory_order_acquire);
+        for (; et != eh; et++) e_pending.push_back(ering[et % EV_RING]);
+        e_tail.store(et, std::memory_order_release);
+        uint64_t edr = e_dropped.load(std::memory_order_relaxed);
+        if (edr != e_dropped_said) {
+            rcs_print("task: NATS event ring full - %llu answers/messages dropped so far\n", (unsigned long long)edr);
+            e_dropped_said = edr;
         }
         uint64_t dr = dropped.load(std::memory_order_relaxed);
         if (dr != dropped_said) {
@@ -332,6 +571,15 @@ struct TaskStatus : halnats::Owner {
             if ((size_t)defs[i].dev == d && mirror_ok[i]) { status_metric(b, i, true, false); dirty[i] = 0; }
         for (size_t k = 0; k < sdefs.size(); k++)
             if ((size_t)sdefs[k].dev == d && smirror_ok[k]) { str_metric(b, k, true, false); sdirty[k] = 0; }
+        if (d == D_TASK) { take_events(); ev_last_all(b, true, false); }
+    }
+    // fold the events into the last values (a birth carries those) and forget them
+    void take_events()
+    {
+        for (const Event &e : e_pending) {
+            if (e.kind == EV_CMD) e_last_cmd = e; else e_last_msg[e.kind - EV_ERROR] = e;
+        }
+        e_pending.clear();
     }
     void data(size_t d, Batch &b) override
     {
@@ -339,6 +587,16 @@ struct TaskStatus : halnats::Owner {
             if ((size_t)defs[i].dev == d && dirty[i]) { status_metric(b, i, false, false); dirty[i] = 0; }
         for (size_t k = 0; k < sdefs.size(); k++)
             if ((size_t)sdefs[k].dev == d && sdirty[k]) { str_metric(b, k, false, false); sdirty[k] = 0; }
+        if (d == D_TASK) {
+            // every event is its own metric value with its own timestamp (repeated metrics in one DDATA)
+            for (const Event &e : e_pending) {
+                if (e.kind == EV_CMD) {
+                    ev_metric(b, EA_SERIAL, e, false, false); ev_metric(b, EA_STATE, e, false, false);
+                    ev_metric(b, EA_CMDERR, e, false, false);
+                } else ev_metric(b, EA_ERROR + (e.kind - EV_ERROR), e, false, false);
+            }
+            // the batch points into e_pending's texts: they stay until the next pull (the batch is sent first)
+        }
     }
     void snapshot(const std::string &want, Batch &b) override
     {
@@ -346,6 +604,7 @@ struct TaskStatus : halnats::Owner {
             if (mirror_ok[i] && (want.empty() || want == dev_names[defs[i].dev])) status_metric(b, i, true, true);
         for (size_t k = 0; k < sdefs.size(); k++)
             if (smirror_ok[k] && (want.empty() || want == dev_names[sdefs[k].dev])) str_metric(b, k, true, true);
+        if (want.empty() || want == "task") ev_last_all(b, true, true);
     }
 };
 TaskStatus owner;
@@ -381,6 +640,7 @@ int taskNatsInit(const char *inifile, int joints, double task_cycle_time, int ha
     sslot.assign(ns, std::string()); sslot_ts.assign(ns, 0); sslot_new.assign(ns, 0);
     smirror.assign(ns, std::string()); smirror_ts.assign(ns, 0); smirror_ok.assign(ns, 0); sdirty.assign(ns, 0);
     str_alias0 = n + 1;
+    ev_alias0 = str_alias0 + ns;
     prev.assign(n, Val{}); prev_ok.assign(n, 0);
     mirror.assign(n, Val{}); mirror_ts.assign(n, 0); mirror_ok.assign(n, 0); dirty.assign(n, 0);
     // ring capacity: four full snapshots, rounded up to a power of two
@@ -391,7 +651,44 @@ int taskNatsInit(const char *inifile, int joints, double task_cycle_time, int ha
 
     if (halnats::start(c, hal_comp_id, &owner)) return -1;
     enabled = true;
+    c_enabled = true;
     return 0;
+}
+
+// Task main loop, in a cycle in which NML brought no new command: the next NATS message to plan.
+RCS_CMD_MSG *taskNatsCommand(void)
+{
+    if (!c_enabled) return nullptr;
+    if (c_cur && c_next < c_cur->msgs.size() && c_rep_state == (int)RCS_STATUS::ERROR)
+        c_next = c_cur->msgs.size();             // program/open: CLOSE failed - OPEN is not sent
+    if (!c_cur || c_next >= c_cur->msgs.size()) {
+        size_t t = c_tail.load(std::memory_order_relaxed);
+        if (t == c_head.load(std::memory_order_acquire)) return nullptr;
+        std::unique_ptr<NCmd> n(cring[t % CMD_RING]);
+        c_tail.store(t + 1, std::memory_order_release);
+        if (!n->refused.empty()) {               // answered here; c_cur (maybe still emcCommand) stays alive
+            push_event(EV_CMD, n->serial, (int)RCS_STATUS::ERROR, n->refused.c_str());
+            return nullptr;
+        }
+        c_cur = std::move(n);                    // the old message is replaced as emcCommand by the caller now
+        c_next = 0; c_rep_state = -1; c_err.clear();
+    }
+    RCS_CMD_MSG *m = c_cur->msgs[c_next++].get();
+    if (c_internal <= INT_MIN + 1) c_internal = 0;
+    m->serial_number = c_cur_internal = --c_internal;
+    return m;
+}
+
+// emcOperatorError / Text / Display (kind 0 / 1 / 2) of the task process, next to the NML error channel
+void taskNatsMessage(int kind, const char *text)
+{
+    if (!c_enabled || kind < 0 || kind > 2) return;
+    push_event((uint8_t)(EV_ERROR + kind), 0, 0, text);
+    if (kind == 0 && c_cur && c_rep_state != (int)RCS_STATUS::DONE && c_rep_state != (int)RCS_STATUS::ERROR
+        && c_err.size() < LINELEN) {          // the text of a failing NATS command's answer
+        if (!c_err.empty()) c_err += "; ";
+        c_err += text;
+    }
 }
 
 // Task main loop, right after the NML status write. Never blocks.
@@ -422,12 +719,14 @@ void taskNatsCycle(const EMC_STAT *stat)
         sslot[k] = v; sslot_ts[k] = ts; sslot_new[k] = 1;
         sprev[k] = v; sprev_ok[k] = 1;
     }
+    answer_cycle(stat);
 }
 
 void taskNatsShutdown(void)
 {
     if (!enabled) return;
     enabled = false;
+    c_enabled = false;
     halnats::stop();
 }
 

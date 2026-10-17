@@ -17,6 +17,11 @@
 *   (relative to the INI's folder) - devices hal / scope. No URL - publishing
 *   off, said once in the log.
 *
+*   Commands: DCMD spBv1//0.<group>.DCMD.<node>.task|motion, one command per message =
+*   cmd/serial (Int64, growing) + one verb: task  state | mode | mdi | program/open |
+*   program/run | program/pause | program/resume | program/step | abort; motion  home | unhome |
+*   teleop | jog/stop | jog/continuous | jog/increment (+ jog/joint, jog/velocity, jog/distance).
+*
 * License: GPL Version 2
 * Copyright (c) 2026 SyncTwin Technologies
 ********************************************************************/
@@ -24,11 +29,21 @@
 #define TASKNATS_HH
 
 class EMC_STAT;
+class RCS_CMD_MSG;
 
 // 0 = publishing on or deliberately off; -1 = [NATS] present but refused (said in the log)
 // hal_comp_id: the task's HAL component (iocontrol) - the sampler FIFO is attached with it
 int taskNatsInit(const char *inifile, int joints, double task_cycle_time, int hal_comp_id);
 void taskNatsCycle(const EMC_STAT *stat);
 void taskNatsShutdown(void);
+
+// Commands from NATS - the second source next to NML (DCMD of devices task / motion, see tasknats.cc).
+// Task main loop, only in a cycle in which NML brought no new command: the next message to plan
+// (emcCommand = it), one per cycle, or nullptr. The answer goes out as an event (task cmd/serial,
+// cmd/state RCS_DONE/EXEC/ERROR, cmd/error) from taskNatsCycle - no client polling.
+RCS_CMD_MSG *taskNatsCommand(void);
+// emcOperatorError / emcOperatorText / emcOperatorDisplay (kind 0 / 1 / 2) -> device task
+// operator/error|text|display (String), next to the NML error channel.
+void taskNatsMessage(int kind, const char *text);
 
 #endif

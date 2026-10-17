@@ -12,6 +12,7 @@
 *   The node owns: the NATS connection (background connect, endless reconnect),
 *   NBIRTH / NDEATH (bdSeq), NCMD "Node Control/Rebirth", the request-reply
 *   snapshot lcnc.<group>.<node>.snapshot, and the devices of the PINS file:
+*     <owner devices> DCMD to the owner (Owner::takes_commands / command)
 *     hal    pins / signals read by name through the HAL query API, DDATA past
 *            quantum/deadband, empty DDATA keepalive, DCMD writes dir=out entries
 *     scope  the sampler FIFO, DDATA batches of Double/FloatArray columns
@@ -64,6 +65,11 @@ struct Owner {
     virtual void birth(size_t dev, Batch &b) = 0;            // full metrics; marks them sent
     virtual void data(size_t dev, Batch &b) = 0;             // changes since the last birth/data
     virtual void snapshot(const std::string &want, Batch &b) = 0;   // names "<device>/<metric>"
+    // DCMD spBv1//0.<group>.DCMD.<node>.<device> of an owner device that takes commands. Called on the
+    // NATS delivery thread of that device's subscription, NOT under the node's lock (one thread per
+    // device: two devices = two threads). Must not block; the payload is freed after the call.
+    virtual bool takes_commands(size_t /*dev*/) const { return false; }
+    virtual void command(size_t /*dev*/, const SparkplugB__Payload * /*pl*/) {}
 };
 
 typedef void (*LogFn)(bool error, const char *line);

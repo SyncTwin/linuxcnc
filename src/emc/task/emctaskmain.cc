@@ -207,9 +207,6 @@ int emcOperatorError(const char *fmt, ...)
     EMC_OPERATOR_ERROR error_msg;
     va_list ap;
 
-    if ( emcErrorBufferOKtoWrite(sizeof(error_msg) * 2, "emcOperatorError"))
-	return -1;
-
     if (NULL == fmt) {
 	return -1;
     }
@@ -229,6 +226,9 @@ int emcOperatorError(const char *fmt, ...)
 
     // write it
     rcs_print("%s\n", error_msg.error);
+    taskNatsMessage(0, error_msg.error);	// NATS first: a full NML error channel must not eat it
+    if ( emcErrorBufferOKtoWrite(sizeof(error_msg) * 2, "emcOperatorError"))
+	return -1;
     return emcErrorBuffer->write(error_msg);
 }
 
@@ -236,9 +236,6 @@ int emcOperatorText(const char *fmt, ...)
 {
     EMC_OPERATOR_TEXT text_msg;
     va_list ap;
-
-    if ( emcErrorBufferOKtoWrite(sizeof(text_msg) * 2, "emcOperatorText"))
-	return -1;
 
     // write args to NML message (ignore int text code)
     va_start(ap, fmt);
@@ -249,6 +246,9 @@ int emcOperatorText(const char *fmt, ...)
     text_msg.text[LINELEN - 1] = 0;
 
     // write it
+    taskNatsMessage(1, text_msg.text);
+    if ( emcErrorBufferOKtoWrite(sizeof(text_msg) * 2, "emcOperatorText"))
+	return -1;
     return emcErrorBuffer->write(text_msg);
 }
 
@@ -256,9 +256,6 @@ int emcOperatorDisplay(const char *fmt, ...)
 {
     EMC_OPERATOR_DISPLAY display_msg;
     va_list ap;
-
-    if ( emcErrorBufferOKtoWrite(sizeof(display_msg) * 2, "emcOperatorDisplay"))
-	return -1;
 
     // write args to NML message (ignore int display code)
     va_start(ap, fmt);
@@ -269,6 +266,9 @@ int emcOperatorDisplay(const char *fmt, ...)
     display_msg.display[LINELEN - 1] = 0;
 
     // write it
+    taskNatsMessage(2, display_msg.display);
+    if ( emcErrorBufferOKtoWrite(sizeof(display_msg) * 2, "emcOperatorDisplay"))
+	return -1;
     return emcErrorBuffer->write(display_msg);
 }
 
@@ -768,8 +768,7 @@ void readahead_waiting(void)
 static bool allow_while_idle_type() {
     // allow for EMC_TASK_MODE::AUTO, EMC_TASK_MODE::MDI
     // expect immediate command
-    RCS_CMD_MSG *emcCommand;
-    emcCommand = emcCommandBuffer->get_address();
+    // the command in hand - NML's buffer or a NATS command (taskNatsCommand)
     switch(emcCommand->_type) {
       case EMC_JOG_CONT_TYPE:
       case EMC_JOG_INCR_TYPE:
@@ -3604,9 +3603,18 @@ int main(int argc, char *argv[])
         task_beat++;  // Task's heartbeat
 
         check_ini_hal_items(emcStatus->motion.traj.joints);
-	// read command
-	if (0 != emcCommandBuffer->read()) {
+	// read command: NML first, then (only when NML brought nothing new) NATS - one per cycle
+	int nml_read = emcCommandBuffer->read();
+	if (0 != nml_read) {
 	    // got a new command, so clear out errors
+	    taskPlanError = 0;
+	    taskExecuteError = 0;
+	}
+	if (nml_read > 0) {
+	    emcCommand = emcCommandBuffer->get_address();
+	} else if (RCS_CMD_MSG *nats_cmd = taskNatsCommand()) {
+	    // the same planner and checks as an NML command; its serial is negative (never an NML one)
+	    emcCommand = nats_cmd;
 	    taskPlanError = 0;
 	    taskExecuteError = 0;
 	}
