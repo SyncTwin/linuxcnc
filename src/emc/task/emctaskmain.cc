@@ -1647,8 +1647,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
 	return 0;
     }
     if (emc_debug & EMC_DEBUG_TASK_ISSUE) {
-	rcs_print("Issuing %s -- \t (serial %d)\n", emcSymbolLookup(cmd->_type),
-		  cmd->serial_number);
+	rcs_print("Issuing %s\n", emcSymbolLookup(cmd->_type));
     }
     switch (cmd->_type) {
 	// general commands
