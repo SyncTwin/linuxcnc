@@ -84,6 +84,7 @@ fpu_control_t __fpu_control = _FPU_IEEE & ~(_FPU_MASK_IM | _FPU_MASK_ZM | _FPU_M
 #include "libnml/nml/nml_oi.hh"
 #include "task.hh"		// emcTaskCommand etc
 #include "taskclass.hh"
+#include "tasknats.hh"		// status -> NATS (Sparkplug B), next to NML
 #include "motion/motion.h"             // EMCMOT_ORIENT_*
 #include "ini/inihal.hh"
 
@@ -3358,6 +3359,7 @@ static int emctask_startup()
 // called to deallocate resources
 static int emctask_shutdown(void)
 {
+    taskNatsShutdown();
     // shut down the subsystems
     if (NULL != emcStatus) {
 	emcTaskHalt();
@@ -3571,6 +3573,8 @@ int main(int argc, char *argv[])
 	emctask_shutdown();
 	exit(1);
     }
+    // [NATS]: refused or off is said in the log; NML runs as before either way
+    taskNatsInit(emc_inifile, joints, emc_task_cycle_time);
     // set the default startup modes
     emcMotionAbort();
     for (int s = 0; s < emcStatus->motion.traj.spindles; s++) emcSpindleAbort(s);
@@ -3782,6 +3786,8 @@ int main(int argc, char *argv[])
 	// will be updated in the _update() functions above. There's
 	// no need to call the individual functions on all WM items.
 	emcStatusBuffer->write(emcStatus);
+	// the same status to NATS: diff -> lock-free ring, never blocks this loop
+	taskNatsCycle(emcStatus);
 
 	// wait on timer cycle, if specified, or calculate actual
 	// interval if INI file says to run full out via

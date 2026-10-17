@@ -492,6 +492,82 @@ install with "sudo apt-get install libmodbus-dev" or disable with
 
 
 #
+# check for libnats (nats.c) + protobuf-c: milltask publishes its status to
+# NATS as Sparkplug B next to NML (emc/task/tasknats.cc). The Sparkplug schema
+# is not kept here: --with-sparkplug-proto names the one file shared with the
+# other Sparkplug writers. Default "auto": on when all three are there.
+#
+
+AC_ARG_WITH(
+    [nats],
+    AS_HELP_STRING(
+        [--with-nats],
+        [Build milltask's status publisher to NATS (Sparkplug B); needs
+        libnats-dev, libprotobuf-c-dev, protoc-c and --with-sparkplug-proto
+        (defaults to "auto").]
+    ),
+    [WITH_NATS=$withval],
+    [WITH_NATS=auto]
+)
+AC_ARG_WITH(
+    [sparkplug-proto],
+    AS_HELP_STRING(
+        [--with-sparkplug-proto=FILE],
+        [The Sparkplug B payload .proto milltask's NATS publisher is generated from.]
+    ),
+    [SPARKPLUG_PROTO=$withval],
+    [SPARKPLUG_PROTO=]
+)
+
+AS_IF(
+    [test "x$WITH_NATS" != "xno"],
+    [
+        NATS_MISSING=
+        AC_MSG_CHECKING([for libnats])
+        if pkg-config libnats >/dev/null 2>&1; then
+            AC_MSG_RESULT(yes - version `pkg-config libnats --modversion`)
+            LIBNATS_CFLAGS=`pkg-config libnats --cflags`
+            LIBNATS_LIBS=`pkg-config libnats --libs`
+        else
+            AC_MSG_RESULT(no); NATS_MISSING="$NATS_MISSING libnats-dev"
+        fi
+        AC_MSG_CHECKING([for libprotobuf-c])
+        if pkg-config libprotobuf-c >/dev/null 2>&1; then
+            AC_MSG_RESULT(yes)
+            PROTOBUFC_CFLAGS=`pkg-config libprotobuf-c --cflags`
+            PROTOBUFC_LIBS=`pkg-config libprotobuf-c --libs`
+        else
+            AC_MSG_RESULT(no); NATS_MISSING="$NATS_MISSING libprotobuf-c-dev"
+        fi
+        AC_PATH_PROG([PROTOC_C], [protoc-c], [none])
+        test "x$PROTOC_C" = "xnone" && NATS_MISSING="$NATS_MISSING protobuf-c-compiler"
+        AC_MSG_CHECKING([for the Sparkplug B .proto])
+        if test -n "$SPARKPLUG_PROTO" && test -r "$SPARKPLUG_PROTO"; then
+            SPARKPLUG_PROTO=`cd "$(dirname "$SPARKPLUG_PROTO")" && pwd`/`basename "$SPARKPLUG_PROTO"`
+            AC_MSG_RESULT([$SPARKPLUG_PROTO])
+        else
+            AC_MSG_RESULT(no); NATS_MISSING="$NATS_MISSING --with-sparkplug-proto=FILE"
+        fi
+        if test -z "$NATS_MISSING"; then
+            AC_DEFINE([HAVE_LIBNATS], [1],
+                [define if milltask publishes its status to NATS (libnats + protobuf-c)])
+            AC_SUBST(HAVE_LIBNATS, yes)
+        elif test "x$WITH_NATS" = "xyes"; then
+            AC_MSG_ERROR([NATS status publisher requested but missing:$NATS_MISSING])
+        else
+            AC_MSG_NOTICE([NATS status publisher off - missing:$NATS_MISSING])
+        fi
+    ]
+)
+AC_SUBST([LIBNATS_CFLAGS])
+AC_SUBST([LIBNATS_LIBS])
+AC_SUBST([PROTOBUFC_CFLAGS])
+AC_SUBST([PROTOBUFC_LIBS])
+AC_SUBST([PROTOC_C])
+AC_SUBST([SPARKPLUG_PROTO])
+
+
+#
 # check for libusb-1.0
 #
 
