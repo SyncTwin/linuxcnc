@@ -42,7 +42,8 @@ class RCS_CMD_MSG;
 
 // 0 = publishing on or deliberately off; -1 = [NATS] present but refused (said in the log)
 // hal_comp_id: the task's HAL component (iocontrol) - the sampler FIFO is attached with it
-int taskNatsInit(const char *inifile, int joints, double task_cycle_time, int hal_comp_id);
+// cmd_queue: [TASK] MDI_QUEUED_COMMANDS (the task's max_mdi_queued_commands) - the NATS command queue
+int taskNatsInit(const char *inifile, int joints, double task_cycle_time, int hal_comp_id, int cmd_queue);
 void taskNatsCycle(const EMC_STAT *stat);
 void taskNatsShutdown(void);
 

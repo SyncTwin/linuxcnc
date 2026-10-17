@@ -30,7 +30,7 @@
 #include <inifile.hh>
 #include <stdlib.h>
 
-int taskNatsInit(const char *inifile, int, double, int)
+int taskNatsInit(const char *inifile, int, double, int, int)
 {
     linuxcnc::IniFile ini(inifile);
     const char *env = getenv("SYNCTWIN_NATS_URL");
@@ -317,6 +317,8 @@ void build_defs(int joints, int spindles, int dio, int aio)
 // before them (lower cmd/serial) are answered ERROR "aborted by ...". A full ring refuses the
 // command with an answer ERROR "command queue full" - never silently, and a resend of the same
 // cmd/serial is accepted (it was not taken).
+// Queue capacity: [TASK] MDI_QUEUED_COMMANDS - the very variable of the task's MDI queue
+// (max_mdi_queued_commands, default MAX_MDI_QUEUE 10), handed in by taskNatsInit.
 
 struct NCmd {
     int64_t serial = 0;                          // the sender's cmd/serial
@@ -330,13 +332,14 @@ struct NCmd {
 struct CmdRing {
     std::vector<NCmd *> slot;
     std::atomic<size_t> head{0}, tail{0};
+    CmdRing() = default;
     explicit CmdRing(size_t n) : slot(n) {}
     bool full() const { return head.load(std::memory_order_relaxed) - tail.load(std::memory_order_acquire) >= slot.size(); }
     void push(NCmd *c) { size_t h = head.load(std::memory_order_relaxed); slot[h % slot.size()] = c; head.store(h + 1, std::memory_order_release); }
     NCmd *front() const { size_t t = tail.load(std::memory_order_relaxed); return t == head.load(std::memory_order_acquire) ? nullptr : slot[t % slot.size()]; }
     void drop_front() { tail.store(tail.load(std::memory_order_relaxed) + 1, std::memory_order_release); }
 };
-CmdRing cring(64);                               // ПРЕДПОЛОЖЕНИЕ, не замер: 64 commands queued ahead of the task
+CmdRing cring;                                   // sized by taskNatsInit: [TASK] MDI_QUEUED_COMMANDS
 CmdRing pring(8);                                // ПРЕДПОЛОЖЕНИЕ, не замер: 8 E-STOP / abort between two task cycles
 std::mutex cmx;                                  // producers only (NATS delivery threads)
 int64_t c_last_serial = INT64_MIN;               // under cmx: the last accepted cmd/serial
@@ -360,7 +363,7 @@ struct Event {
     uint64_t ts_ms;
     char text[LINELEN];                          // EV_CMD: the error, else the message
 };
-const size_t EV_RING = 256;                      // ПРЕДПОЛОЖЕНИЕ, не замер: 256 events between two publishes
+const size_t EV_RING = 256;                      // ПРЕДПОЛОЖЕНИЕ, не замер: 256 events between two publishes - to measure under load
 Event ering[EV_RING];
 std::atomic<size_t> e_head{0}, e_tail{0};
 std::mutex emx;                                  // producers (task thread; serialized for safety)
@@ -516,7 +519,8 @@ void on_command(size_t dev, const SparkplugB__Payload *pl)
     CmdRing &r = c->prio ? pring : cring;
     if (r.full()) {                              // refused with an answer; c_last_serial untouched: a resend is accepted
         std::string why = std::string(c->prio ? "priority " : "") + "command queue full: "
-                        + std::to_string(r.slot.size()) + " commands not yet taken by the task";
+                        + std::to_string(r.slot.size()) + " commands not yet taken by the task"
+                        + (c->prio ? "" : " ([TASK] MDI_QUEUED_COMMANDS)");
         rcs_print_error("task: NATS DCMD %s cmd/serial %lld refused: %s\n", dev_names[dev].c_str(), (long long)c->serial, why.c_str());
         push_event(EV_CMD, c->serial, (int)RCS_STATUS::ERROR, why.c_str());
         return;
@@ -673,7 +677,7 @@ void log_line(bool error, const char *ln)
 
 } // namespace
 
-int taskNatsInit(const char *inifile, int joints, double task_cycle_time, int hal_comp_id)
+int taskNatsInit(const char *inifile, int joints, double task_cycle_time, int hal_comp_id, int cmd_queue)
 {
     halnats::Config c;
     c.tag = "task";
@@ -712,6 +716,10 @@ int taskNatsInit(const char *inifile, int joints, double task_cycle_time, int ha
     size_t cap = 1;
     while (cap < 4 * n) cap <<= 1;
     ring.assign(cap, Change{}); ring_mask = cap - 1;
+
+    // command queue: [TASK] MDI_QUEUED_COMMANDS (cmd_queue); 0 = nothing waits behind the one in hand
+    // but the hand-over slot itself, so one slot at least
+    cring.slot.assign(cmd_queue > 0 ? (size_t)cmd_queue : 1, nullptr);
 
     if (halnats::start(c, hal_comp_id, &owner)) return -1;
     enabled = true;

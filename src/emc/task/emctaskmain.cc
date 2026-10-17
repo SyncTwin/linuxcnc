@@ -3573,7 +3573,8 @@ int main(int argc, char *argv[])
 	exit(1);
     }
     // [NATS]: refused or off is said in the log; NML runs as before either way
-    taskNatsInit(emc_inifile, joints, emc_task_cycle_time, task_methods ? task_methods->comp_id : -1);
+    taskNatsInit(emc_inifile, joints, emc_task_cycle_time, task_methods ? task_methods->comp_id : -1,
+                 max_mdi_queued_commands);
     // set the default startup modes
     emcMotionAbort();
     for (int s = 0; s < emcStatus->motion.traj.spindles; s++) emcSpindleAbort(s);
