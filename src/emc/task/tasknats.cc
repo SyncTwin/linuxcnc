@@ -296,6 +296,9 @@ void build_defs(int joints, int spindles)
 // harmless); inside the task the message carries a NEGATIVE serial of its own, so it can never
 // equal an NML serial (NML write ids are positive) and the planner's "new command" test
 // (serial != echo) stays exact across the two sources.
+// One at a time: the next queued command is planned only after the final answer (DONE / ERROR) of
+// the one in hand - every cmd/serial gets exactly one final answer (an NML command superseding it
+// answers it ERROR "superseded"), and an MDI line holds the queue until its move is done.
 // Priority lane (as Abort above all in PLCopen / ISA-88): state ESTOP and abort go to a ring of
 // their own that the task takes first - ahead of the queue and of the rest of the command in hand.
 // What they overtake is aborted, not left hanging: the command in hand and the commands queued
@@ -502,7 +505,10 @@ void answer_cycle(const EMC_STAT *stat)
     // DONE / ERROR is the command's last answer: a later error of the machine is not this command's
     if (c_rep_state == (int)RCS_STATUS::DONE || c_rep_state == (int)RCS_STATUS::ERROR) return;
     int st;
-    if (stat->echo_serial_number != c_cur_internal) st = c_rep_state;   // superseded (NML): the last answer stands
+    if (stat->echo_serial_number != c_cur_internal) {   // superseded by an NML command: its outcome is not ours to see
+        st = (int)RCS_STATUS::ERROR;
+        c_err = "superseded by an NML command (serial " + std::to_string(stat->echo_serial_number) + ") before its answer";
+    }
     else if (c_next < c_cur->msgs.size()) st = stat->status == RCS_STATUS::ERROR ? (int)RCS_STATUS::ERROR : (int)RCS_STATUS::EXEC;
     else st = (int)stat->status;
     if (st == c_rep_state || st < 0) return;
@@ -701,6 +707,8 @@ RCS_CMD_MSG *taskNatsCommand(void)
         c_cur = std::move(n);
         c_next = 0; c_rep_state = -1; c_err.clear();
     } else if (!c_cur || c_next >= c_cur->msgs.size()) {
+        // one at a time, in cmd/serial order: the next is taken only after the final answer of the one in hand
+        if (c_cur && c_rep_state != (int)RCS_STATUS::DONE && c_rep_state != (int)RCS_STATUS::ERROR) return nullptr;
         NCmd *q = cring.front();
         if (!q) return nullptr;
         cring.drop_front();
