@@ -492,22 +492,21 @@ install with "sudo apt-get install libmodbus-dev" or disable with
 
 
 #
-# check for libnats (nats.c) + protobuf-c: milltask publishes its status to
-# NATS as Sparkplug B next to NML (emc/task/tasknats.cc). The Sparkplug schema
-# is not kept here: --with-sparkplug-proto names the one file shared with the
-# other Sparkplug writers. Default "auto": on when all three are there.
+# check for libnats (nats.c) + protobuf-c: NATS (Sparkplug B) is milltask's
+# only bus - commands in, status out (emc/task/tasknats.cc); there is no NML.
+# Required. The Sparkplug schema is not kept here: --with-sparkplug-proto
+# names the one file shared with the other Sparkplug writers.
 #
 
 AC_ARG_WITH(
     [nats],
     AS_HELP_STRING(
         [--with-nats],
-        [Build milltask's status publisher to NATS (Sparkplug B); needs
-        libnats-dev, libprotobuf-c-dev, protoc-c and --with-sparkplug-proto
-        (defaults to "auto").]
+        [milltask's bus, NATS (Sparkplug B) - required; needs libnats-dev,
+        libprotobuf-c-dev, protoc-c and --with-sparkplug-proto.]
     ),
     [WITH_NATS=$withval],
-    [WITH_NATS=auto]
+    [WITH_NATS=yes]
 )
 AC_ARG_WITH(
     [sparkplug-proto],
@@ -553,12 +552,11 @@ AS_IF(
             AC_DEFINE([HAVE_LIBNATS], [1],
                 [define if milltask publishes its status to NATS (libnats + protobuf-c)])
             AC_SUBST(HAVE_LIBNATS, yes)
-        elif test "x$WITH_NATS" = "xyes"; then
-            AC_MSG_ERROR([NATS status publisher requested but missing:$NATS_MISSING])
         else
-            AC_MSG_NOTICE([NATS status publisher off - missing:$NATS_MISSING])
+            AC_MSG_ERROR([milltask's bus NATS (no NML) is missing:$NATS_MISSING])
         fi
-    ]
+    ],
+    [AC_MSG_ERROR([--without-nats: milltask has no other bus (NML is gone)])]
 )
 AC_SUBST([LIBNATS_CFLAGS])
 AC_SUBST([LIBNATS_LIBS])

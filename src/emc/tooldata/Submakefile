@@ -14,11 +14,9 @@ LIBTOOLDATA_SRCS += emc/tooldata/tooldata_common.cc
 CXXUSERSRCS      += emc/tooldata/tooldata_db.cc
 LIBTOOLDATA_SRCS += emc/tooldata/tooldata_db.cc
 
-CXXUSERSRCS += emc/tooldata/tool_watch.cc
 USERSRCS += $(LIBTOOLDATA_SRCS)
 
 TARGETS += ../lib/libtooldata.so ../lib/libtooldata.so.0
-TARGETS += ../bin/tool_watch
 
 $(call TOOBJSDEPS, $(LIBTOOLDATA_SRCS)) : EXTRAFLAGS=-fPIC
 
@@ -36,6 +34,5 @@ TOOL_MMAP_READ_SRCS = emc/tooldata/tool_mmap_read.cc
 	@$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) ../lib/libtooldata.so.0
 endif
 
-TOOL_WATCH_SRCS = emc/tooldata/tool_watch.cc
-../bin/tool_watch: $(TOOL_WATCH_SRCS) ../lib/liblinuxcnc.a ../lib/libnml.so.0
-	@$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) ../lib/liblinuxcnc.a ../lib/libnml.so.0
+# tool_watch (an NML status reader) is gone with NML: the tool table of a running task is in the
+# tooldata mmap (tool_mmap_read); the spindle tool and pockets in the NATS status io/tool/*.

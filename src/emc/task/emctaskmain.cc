@@ -84,7 +84,7 @@ fpu_control_t __fpu_control = _FPU_IEEE & ~(_FPU_MASK_IM | _FPU_MASK_ZM | _FPU_M
 #include "libnml/nml/nml_oi.hh"
 #include "task.hh"		// emcTaskCommand etc
 #include "taskclass.hh"
-#include "tasknats.hh"		// status -> NATS (Sparkplug B), next to NML
+#include "tasknats.hh"		// the only command source and status sink: NATS (Sparkplug B)
 #include "motion/motion.h"             // EMCMOT_ORIENT_*
 #include "ini/inihal.hh"
 
@@ -98,13 +98,10 @@ static emcmot_config_t emcmotConfig;
 #define DEFAULT_EMC_UI_TIMEOUT 5.0
 
 
-// NML channels
-static RCS_CMD_CHANNEL *emcCommandBuffer = NULL;
-static RCS_STAT_CHANNEL *emcStatusBuffer = NULL;
-static NML *emcErrorBuffer = NULL;
-
-// NML command channel data pointer
-static RCS_CMD_MSG *emcCommand = NULL;
+// The command in hand: the last message taskNatsCommand() gave (NATS DCMD); before the first one a
+// null message whose serial 0 equals the initial echo, so nothing is planned. No NML channels exist.
+static EMC_NULL emcNullCommand;
+static RCS_CMD_MSG *emcCommand = &emcNullCommand;
 
 // global EMC status
 EMC_STAT *emcStatus = NULL;
@@ -168,39 +165,6 @@ void emctask_quit(int sig)
     signal(sig, emctask_quit);
 }
 
-/* make sure at least space bytes are available on
- * error channel; wait a bit to drain if needed
- */
-int emcErrorBufferOKtoWrite(int space, const char *caller)
-{
-    // check channel for validity
-    if (emcErrorBuffer == NULL)
-	return -1;
-    if (!emcErrorBuffer->valid())
-	return -1;
-
-    double send_errorchan_timout = etime() + DEFAULT_EMC_UI_TIMEOUT;
-
-    while (etime() < send_errorchan_timout) {
-	if (emcErrorBuffer->get_space_available() < space) {
-	    esleep(0.01);
-	    continue;
-	} else {
-	    break;
-	}
-    }
-    if (etime() >= send_errorchan_timout) {
-	if (emc_debug & EMC_DEBUG_TASK_ISSUE) {
-	    rcs_print("timeout waiting for error channel to drain, caller=`%s' request=%d\n", caller,space);
-	}
-	return -1;
-    } else {
-	// printf("--- %d bytes available after %f seconds\n", space, etime() - send_errorchan_timout + DEFAULT_EMC_UI_TIMEOUT);
-    }
-    return 0;
-}
-
-
 // implementation of EMC error logger
 int emcOperatorError(const char *fmt, ...)
 {
@@ -226,10 +190,8 @@ int emcOperatorError(const char *fmt, ...)
 
     // write it
     rcs_print("%s\n", error_msg.error);
-    taskNatsMessage(0, error_msg.error);	// NATS first: a full NML error channel must not eat it
-    if ( emcErrorBufferOKtoWrite(sizeof(error_msg) * 2, "emcOperatorError"))
-	return -1;
-    return emcErrorBuffer->write(error_msg);
+    taskNatsMessage(0, error_msg.error);
+    return 0;
 }
 
 int emcOperatorText(const char *fmt, ...)
@@ -247,9 +209,7 @@ int emcOperatorText(const char *fmt, ...)
 
     // write it
     taskNatsMessage(1, text_msg.text);
-    if ( emcErrorBufferOKtoWrite(sizeof(text_msg) * 2, "emcOperatorText"))
-	return -1;
-    return emcErrorBuffer->write(text_msg);
+    return 0;
 }
 
 int emcOperatorDisplay(const char *fmt, ...)
@@ -267,9 +227,7 @@ int emcOperatorDisplay(const char *fmt, ...)
 
     // write it
     taskNatsMessage(2, display_msg.display);
-    if ( emcErrorBufferOKtoWrite(sizeof(display_msg) * 2, "emcOperatorDisplay"))
-	return -1;
-    return emcErrorBuffer->write(display_msg);
+    return 0;
 }
 
 /*
@@ -1689,8 +1647,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
 	return 0;
     }
     if (emc_debug & EMC_DEBUG_TASK_ISSUE) {
-	rcs_print("Issuing %s -- \t (%s)\n", emcSymbolLookup(cmd->_type),
-		  emcCommandBuffer->msg2str(cmd));
+	rcs_print("Issuing %s -- \t (serial %d)\n", emcSymbolLookup(cmd->_type),
+		  cmd->serial_number);
     }
     switch (cmd->_type) {
 	// general commands
@@ -3192,87 +3150,6 @@ static int emctask_startup()
     // // get our status data structure
     // emcStatus = new EMC_STAT;
 
-    // get the NML command buffer
-    end = RETRY_TIME;
-    good = 0;
-    do {
-	if (NULL != emcCommandBuffer) {
-	    delete emcCommandBuffer;
-	}
-	emcCommandBuffer =
-	    new RCS_CMD_CHANNEL(emcFormat, "emcCommand", "emc",
-				emc_nmlfile);
-	if (emcCommandBuffer->valid()) {
-	    good = 1;
-	    break;
-	}
-	esleep(RETRY_INTERVAL);
-	end -= RETRY_INTERVAL;
-	if (done) {
-	    emctask_shutdown();
-	    exit(1);
-	}
-    } while (end > 0.0);
-
-    if (!good) {
-	rcs_print_error("can't get emcCommand buffer\n");
-	return -1;
-    }
-    // get our command data structure
-    emcCommand = emcCommandBuffer->get_address();
-
-    // get the NML status buffer
-    end = RETRY_TIME;
-    good = 0;
-    do {
-	if (NULL != emcStatusBuffer) {
-	    delete emcStatusBuffer;
-	}
-	emcStatusBuffer =
-	    new RCS_STAT_CHANNEL(emcFormat, "emcStatus", "emc",
-				 emc_nmlfile);
-	if (emcStatusBuffer->valid()) {
-	    good = 1;
-	    break;
-	}
-	esleep(RETRY_INTERVAL);
-	end -= RETRY_INTERVAL;
-	if (done) {
-	    emctask_shutdown();
-	    exit(1);
-	}
-    } while (end > 0.0);
-
-    if (!good) {
-	rcs_print_error("can't get emcStatus buffer\n");
-	return -1;
-    }
-
-    // get the NML error buffer
-    end = RETRY_TIME;
-    good = 0;
-    do {
-	if (NULL != emcErrorBuffer) {
-	    delete emcErrorBuffer;
-	}
-	emcErrorBuffer =
-	    new NML(nmlErrorFormat, "emcError", "emc", emc_nmlfile);
-	if (emcErrorBuffer->valid()) {
-	    good = 1;
-	    break;
-	}
-	esleep(RETRY_INTERVAL);
-	end -= RETRY_INTERVAL;
-	if (done) {
-	    emctask_shutdown();
-	    exit(1);
-	}
-    } while (end > 0.0);
-
-    if (!good) {
-	rcs_print_error("can't get emcError buffer\n");
-	return -1;
-    }
     // get the timer
     if (!emcTaskNoDelay) {
 	timer = new RCS_TIMER(emc_task_cycle_time, "", "");
@@ -3370,24 +3247,7 @@ static int emctask_shutdown(void)
 	delete timer;
 	timer = NULL;
     }
-    // delete the NML channels
-
-    if (NULL != emcErrorBuffer) {
-	delete emcErrorBuffer;
-	emcErrorBuffer = NULL;
-    }
-
-    if (NULL != emcStatusBuffer) {
-	delete emcStatusBuffer;
-	emcStatusBuffer = NULL;
-	emcStatus = NULL;
-    }
-
-    if (NULL != emcCommandBuffer) {
-	delete emcCommandBuffer;
-	emcCommandBuffer = NULL;
-	emcCommand = NULL;
-    }
+    emcCommand = &emcNullCommand;
 
     if (NULL != emcStatus) {
 	delete emcStatus;
@@ -3444,11 +3304,6 @@ static int iniLoad(const char *filename)
             program_invocation_short_name, getpid(), machine.c_str(), version.c_str()
         );
     }
-
-    if (auto inistring = inifile.findString("NML_FILE", "EMC")) {
-	// copy to global
-	rtapi_strxcpy(emc_nmlfile, inistring->c_str());
-    } // else not found, use default
 
     if (auto inival = inifile.findSInt("INTERP_MAX_LEN", "TASK")) {
         if (*inival > 0) {
@@ -3573,8 +3428,12 @@ int main(int argc, char *argv[])
 	exit(1);
     }
     // [NATS]: refused or off is said in the log; NML runs as before either way
-    taskNatsInit(emc_inifile, joints, emc_task_cycle_time, task_methods ? task_methods->comp_id : -1,
-                 max_mdi_queued_commands);
+    if (taskNatsInit(emc_inifile, joints, emc_task_cycle_time, task_methods ? task_methods->comp_id : -1,
+                     max_mdi_queued_commands)) {
+	rcs_print_error("can't start the NATS bus - the task has no command source\n");
+	emctask_shutdown();
+	exit(1);
+    }
     // set the default startup modes
     emcMotionAbort();
     for (int s = 0; s < emcStatus->motion.traj.spindles; s++) emcSpindleAbort(s);
@@ -3604,17 +3463,9 @@ int main(int argc, char *argv[])
         task_beat++;  // Task's heartbeat
 
         check_ini_hal_items(emcStatus->motion.traj.joints);
-	// read command: NML first, then (only when NML brought nothing new) NATS - one per cycle
-	int nml_read = emcCommandBuffer->read();
-	if (0 != nml_read) {
+	// read command: NATS is the only source - one message per cycle
+	if (RCS_CMD_MSG *nats_cmd = taskNatsCommand()) {
 	    // got a new command, so clear out errors
-	    taskPlanError = 0;
-	    taskExecuteError = 0;
-	}
-	if (nml_read > 0) {
-	    emcCommand = emcCommandBuffer->get_address();
-	} else if (RCS_CMD_MSG *nats_cmd = taskNatsCommand()) {
-	    // the same planner and checks as an NML command; its serial is negative (never an NML one)
 	    emcCommand = nats_cmd;
 	    taskPlanError = 0;
 	    taskExecuteError = 0;
@@ -3794,8 +3645,7 @@ int main(int argc, char *argv[])
 	// since emcStatus was passed to the WM init functions, it
 	// will be updated in the _update() functions above. There's
 	// no need to call the individual functions on all WM items.
-	emcStatusBuffer->write(emcStatus);
-	// the same status to NATS: diff -> lock-free ring, never blocks this loop
+	// status to NATS: diff -> lock-free ring, never blocks this loop
 	taskNatsCycle(emcStatus);
 
 	// wait on timer cycle, if specified, or calculate actual

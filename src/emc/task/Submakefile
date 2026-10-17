@@ -1,15 +1,4 @@
 
-EMCSVRSRCS := \
-	emc/task/emcsvr.cc \
-	emc/usr_intf/mapini.cc
-
-USERSRCS += $(EMCSVRSRCS)
-
-../bin/linuxcncsvr: $(call TOOBJS, $(EMCSVRSRCS)) ../lib/liblinuxcnchal.so.0 ../lib/liblinuxcnc.a ../lib/libnml.so.0 ../lib/liblinuxcncini.so.1
-	$(ECHO) Linking $(notdir $@)
-	$(Q)$(CXX) -o $@ $^ $(LDFLAGS)
-TARGETS += ../bin/linuxcncsvr
-
 # disabled:	emc/task/iotaskintf.cc
 MILLTASKSRCS := \
 	emc/motion/emcmotglb.c \
@@ -26,14 +15,12 @@ MILLTASKSRCS := \
 	emc/usr_intf/mapini.cc \
 	emc/task/tasknats.cc
 
-# Status -> NATS (Sparkplug B): the node is the halnats library
-# (hal/utils/halnats/Submakefile); without libnats tasknats.cc builds its "off" stub.
-ifdef HAVE_LIBNATS
+# The task's only bus - NATS (Sparkplug B), no NML channels: the node is the halnats library
+# (hal/utils/halnats/Submakefile); libnats is required (configure).
 objects/emc/task/tasknats.o: $(SPB_GEN)/sparkplug_b_payload.pb-c.h
 objects/emc/task/tasknats.o: EXTRAFLAGS += $(HALNATS_CFLAGS)
 MILLTASK_NATS_LIBS := ../lib/libhalnats.a $(HALNATS_LIBS)
 ../bin/milltask: ../lib/libhalnats.a
-endif
 
 USERSRCS += $(MILLTASKSRCS)
 
