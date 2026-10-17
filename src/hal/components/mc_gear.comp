@@ -1,0 +1,242 @@
+component mc_gear "PLCopen MC Part 1 electronic gear: MC_GearIn / MC_GearOut of a slave mc_axis to a master position";
+author "SyncTwin";
+license "GPL";
+
+description
+"""
+The electronic gear of PLCopen Motion Control Part 1 v2.0 (MC_GearIn § 4.5,
+MC_GearOut § 4.6) for a slave *mc_axis*(9) that has no cyclic synchronous
+mode of its own.  One instance per slave axis.  The component is the master
+of the slave's SynchronizedMotion, as *mc_group*(9) is of its members: it
+writes *sync-enable* and *sync-pos* of the slave every period.  A slave is
+either a member of a group or the slave of a gear: an input pin of HAL has
+one writer, the configuration chooses.
+
+MASTER (*master-pos*): the master axis's position, axis frame.  mcSetValue =
+mc-axis.M.commanded-position, mcActualValue = mc-axis.M.actual-position: the
+configuration wires one of them (MasterValueSource is a wiring, not a pin).
+The master may be a virtual axis (an mc_axis whose pos-fb is its pos-cmd).
+The master's velocity and acceleration are the differences of master-pos
+over the period.  *master-axis* names the axis master-pos is wired from
+(set by the configuration); a GearIn whose *master-req* differs is refused
+(11), so a program can not gear to a master it is not wired to.  The slave
+does not act on the master.
+
+MC_GEARIN (rising edge of *gear-in*): ratio = *ratio-num* / *ratio-den*
+(INT / UINT, Part 1 p. 94), *acceleration*, *deceleration*, *jerk* latched
+with it.  0 acceleration = *slave-maxa*, 0 deceleration = acceleration,
+both capped by slave-maxa; *jerk* = 0 = no jerk limit (trapezoid), > 0 =
+the slave's acceleration changes at most by jerk per second.  From Standstill
+of the slave only (mc_axis enters SynchronizedMotion from Standstill alone),
+else refused (2).  The slave's velocity is ramped from its own (0) to ratio
+times the master's velocity by this component (mc_axis does not limit the
+acceleration in SynchronizedMotion), then the slave is coupled: *in-gear*,
+sync-pos = p0 + ratio (master-pos - m0).  The distance lost while ramping is
+not caught up (Part 1 p. 94 note 1).  A GearIn while coupled or ramping
+changes the ratio on the fly from the slave's present velocity (note 2):
+the running GearIn is aborted, the new one ramps and couples again.  Busy
+stays while coupled (as MC_MoveVelocity after InVelocity) until a GearOut,
+another GearIn or the slave leaves SynchronizedMotion.
+
+MC_GEAROUT (rising edge of *gear-out*): sync-enable falls, the slave
+decelerates at its maxa to Standstill (mc_axis).  Part 1 p. 96 keeps the
+slave in ContinuousMotion at its last velocity; this component brakes it
+instead (a mill stand must not run on without its strip).  Done in the same
+period; refused (2) when not geared.
+
+ERROR IDS (pin *error-id*, as mc_axis where the meaning is shared): 2 command
+not allowed in this state, 7 invalid parameters (ratio-den 0, negative
+acceleration/deceleration/jerk, slave-maxv or slave-maxa not > 0),
+10 ratio times the master's velocity is over slave-maxv, 11 master-req is
+not master-axis, 12 the slave went to ErrorStop while geared.  The slave
+leaving SynchronizedMotion otherwise (MC_Stop) aborts the GearIn.
+
+COMMAND NUMBERS (pins *command-id*, *done-id*, *aborted-id*,
+*failed-id*), as mc_axis: every rising edge of gear-in/gear-out gets the
+next number; a GearOut is done, a GearIn is never done (Busy until aborted),
+a refusal or an error is failed.  busy/done/active/command-aborted/error/
+error-id belong to the newest command.
+""";
+
+notes
+"""
+Wiring of a slave S geared to a virtual master M (both mc_axis):
+
+----
+net gear-m   mc-axis.M.commanded-position => mc-gear.S.master-pos
+net gear-sp  mc-axis.S.commanded-position => mc-gear.S.slave-pos
+net gear-st  mc-axis.S.state              => mc-gear.S.slave-state
+net gear-en  mc-gear.S.sync-enable        => mc-axis.S.sync-enable
+net gear-pos mc-gear.S.sync-pos           => mc-axis.S.sync-pos
+setp mc-gear.S.slave-maxv = mc-axis.S.maxv; setp mc-gear.S.slave-maxa = mc-axis.S.maxa; setp mc-gear.S.master-axis M
+----
+
+addf the master mc_axis before mc-gear.S and mc-gear.S before the slave's
+mc_axis: the slave takes this period's sync-pos.
+""";
+
+// ---- commands (PLCopen FB inputs)
+pin in bool gear_in "rising edge: MC_GearIn (ratio, acceleration, deceleration, jerk, master-req latched)";
+pin in bool gear_out "rising edge: MC_GearOut";
+pin in sint ratio_num = 1 "MC_GearIn.RatioNumerator (INT)";
+pin in uint ratio_den = 1 "MC_GearIn.RatioDenominator (UINT), > 0";
+pin in real acceleration "MC_GearIn.Acceleration of the slave while ramping in; 0 = slave-maxa";
+pin in real deceleration "MC_GearIn.Deceleration; 0 = acceleration";
+pin in real jerk "MC_GearIn.Jerk; 0 = none (trapezoid)";
+pin in sint master_req "MC_GearIn.Master.AxisNo";
+
+// ---- configuration
+pin in sint master_axis = -1 "the axis master-pos is wired from (-1: none, every GearIn is refused)";
+pin in real slave_maxv "= mc-axis.S.maxv";
+pin in real slave_maxa "= mc-axis.S.maxa";
+
+// ---- master and slave
+pin in real master_pos "mc-axis.M.commanded-position (mcSetValue) or actual-position (mcActualValue)";
+pin in real slave_pos "mc-axis.S.commanded-position: where the ramp starts";
+pin in sint slave_state "mc-axis.S.state";
+pin out bool sync_enable "to mc-axis.S.sync-enable";
+pin out real sync_pos "to mc-axis.S.sync-pos (axis frame)";
+
+// ---- status (PLCopen FB outputs, newest command)
+pin out bool in_gear "MC_GearIn.InGear: the slave is coupled";
+pin out bool busy;
+pin out bool done "MC_GearOut.Done";
+pin out bool active;
+pin out bool command_aborted;
+pin out bool error;
+pin out sint error_id;
+pin out uint command_id;
+pin out uint done_id;
+pin out uint aborted_id;
+pin out uint failed_id;
+pin out real slave_vel "the slave's synchronized velocity (ratio x master velocity once coupled)";
+
+variable int g;            // 0 free, 1 ramping in, 2 coupled
+variable int seq;          // last command number given out
+variable int run_id;       // number of the running GearIn, 0 none
+variable int in_old;
+variable int out_old;
+variable int primed;       // master-pos seen once: its differences are velocities
+variable int seen_sync;    // the slave reached SynchronizedMotion under this gear
+variable double mprev;     // master-pos last period
+variable double vmprev;    // master velocity last period
+variable double am_last;   // master acceleration last period
+variable double r;         // ratio of the running GearIn
+variable double acc_c;     // its acceleration, deceleration, jerk
+variable double dec_c;
+variable double jerk_c;
+variable double sp;        // slave position commanded (sync-pos)
+variable double vs;        // slave velocity
+variable double as;        // slave acceleration
+variable double p0;        // coupling: slave position ...
+variable double m0;        // ... at master position
+
+function _;
+;;
+
+#include <rtapi_math.h>
+
+#define ST_STANDSTILL 1
+#define ST_SYNCHRONIZED_MOTION 5
+#define ST_ERROR_STOP 7
+
+#define E_COMMAND_NOT_ALLOWED_IN_STATE 2
+#define E_INVALID_PARAMETERS 7
+#define E_SYNC_VELOCITY_OVER_MAXV 10
+#define E_NOT_THIS_MASTER 11
+#define E_SLAVE_ERROR_STOP 12
+
+/* the running GearIn ends: release the slave (mc_axis brakes it at maxa) */
+static void release(struct __comp_state *__comp_inst) {
+    g = 0; seen_sync = 0; run_id = 0; sync_enable_set(0); in_gear_set(0);
+}
+
+static void fail(struct __comp_state *__comp_inst, int id, int code) {
+    busy_set(0); active_set(0); done_set(0); command_aborted_set(0); in_gear_set(0);
+    error_set(1); error_id_set(code); failed_id_set(id);
+}
+
+FUNCTION(_) {
+    double dt = period * 1e-9, vm, am, amprev, vt, at;
+    int in_edge = gear_in && !in_old, out_edge = gear_out && !out_old, lock = 0, fresh = 0;
+    in_old = gear_in; out_old = gear_out;
+
+    if (!primed) { mprev = master_pos; vmprev = 0.0; primed = 1; }
+    amprev = am_last;
+    vm = (master_pos - mprev) / dt; am = (vm - vmprev) / dt;
+    mprev = master_pos; vmprev = vm; am_last = am;
+
+    /* the slave left SynchronizedMotion under the gear: MC_Stop aborts, ErrorStop fails the GearIn */
+    if (g) {
+        if (slave_state == ST_SYNCHRONIZED_MOTION) seen_sync = 1;
+        if (slave_state == ST_ERROR_STOP) { fail(__comp_inst, run_id, E_SLAVE_ERROR_STOP); release(__comp_inst); }
+        else if ((seen_sync && slave_state != ST_SYNCHRONIZED_MOTION)
+                 || (slave_state != ST_STANDSTILL && slave_state != ST_SYNCHRONIZED_MOTION)) {
+            busy_set(0); active_set(0); command_aborted_set(1); aborted_id_set(run_id); release(__comp_inst);
+        }
+    }
+
+    if (out_edge) {
+        command_id_set(++seq);
+        if (!g) fail(__comp_inst, seq, E_COMMAND_NOT_ALLOWED_IN_STATE);
+        else {
+            aborted_id_set(run_id); release(__comp_inst);
+            busy_set(0); active_set(0); command_aborted_set(0); error_set(0); error_id_set(0);
+            done_set(1); done_id_set(seq);
+        }
+    } else if (in_edge) {
+        command_id_set(++seq);
+        if (ratio_den == 0 || acceleration < 0.0 || deceleration < 0.0 || jerk < 0.0
+            || slave_maxv <= 0.0 || slave_maxa <= 0.0) fail(__comp_inst, seq, E_INVALID_PARAMETERS);
+        else if (master_req != master_axis) fail(__comp_inst, seq, E_NOT_THIS_MASTER);
+        else if (!g && slave_state != ST_STANDSTILL) fail(__comp_inst, seq, E_COMMAND_NOT_ALLOWED_IN_STATE);
+        else {
+            if (g) aborted_id_set(run_id);   /* a new ratio on the fly: from the slave's present velocity */
+            else { sp = slave_pos; vs = 0.0; as = 0.0; seen_sync = 0; fresh = 1; }
+            r = (double)ratio_num / (double)ratio_den;
+            acc_c = acceleration > 0.0 && acceleration < slave_maxa ? acceleration : slave_maxa;
+            dec_c = deceleration > 0.0 ? (deceleration < slave_maxa ? deceleration : slave_maxa) : acc_c;
+            jerk_c = jerk;
+            g = 1; run_id = seq;
+            busy_set(1); active_set(1); done_set(0); command_aborted_set(0); error_set(0); error_id_set(0); in_gear_set(0);
+            sync_enable_set(1);
+        }
+    }
+
+    vt = r * vm; at = r * am;
+    /* the period sync-enable rises the slave enters SynchronizedMotion and takes no step: the ramp starts next period */
+    if (g == 1 && !fresh) {
+        if (fabs(vt) > slave_maxv) { fail(__comp_inst, run_id, E_SYNC_VELOCITY_OVER_MAXV); release(__comp_inst); }
+        else {
+            double rem = vt - vs, alim = (vs == 0.0 || (vs > 0.0) == (rem > 0.0)) ? acc_c : dec_c, vold = vs;
+            if (jerk_c <= 0.0) {   /* trapezoid: |dv| <= a dt per period, the last step lands on ratio x master */
+                if (fabs(rem) <= alim * dt) lock = 1;
+                else { as = rem > 0.0 ? alim : -alim; vs += as * dt; }
+            } else {               /* S-curve on the velocity difference: the relative acceleration that still rounds
+                                    * off to 0 at ratio x master (as mc_axis scurve_step), reached at jerk; coupled when
+                                    * velocity and acceleration both meet the master's within one jerk step */
+                double dj = jerk_c * dt, aold = as, ak = rem / dt, apred = 2.0 * at - r * amprev,
+                       areq = -dj + sqrt(2.0 * jerk_c * fabs(rem) + dj * dj), ades = at + (rem < 0.0 ? -areq : areq);
+                /* couple now when the step onto ratio x master (acceleration ak) and the next one (onto the master's
+                 * acceleration, extrapolated by its jerk) are both within one jerk step */
+                if (fabs(ak - aold) <= dj && fabs(apred - ak) <= dj) lock = 1;
+                else {
+                    if (ades > alim) ades = alim;
+                    if (ades < -alim) ades = -alim;
+                    if (ades > as + dj) as += dj;
+                    else if (ades < as - dj) as -= dj;
+                    else as = ades;
+                    vs += as * dt;
+                }
+            }
+            if (lock) { vs = vt; as = (vt - vold) / dt; }
+            sp += vs * dt;
+            if (lock) { g = 2; p0 = sp; m0 = master_pos; in_gear_set(1); }
+        }
+    } else if (g == 2) {
+        sp = p0 + r * (master_pos - m0); vs = vt; as = at;
+    }
+    if (!g) { sp = slave_pos; vs = 0.0; as = 0.0; }
+    sync_pos_set(sp);
+    slave_vel_set(vs);
+}

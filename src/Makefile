@@ -697,7 +697,8 @@ install-dirs:
 		$(DESTDIR)$(datadir)/linuxcnc/stepconf \
 		$(DESTDIR)$(datadir)/linuxcnc/pncconf \
 		$(DESTDIR)$(datadir)/linuxcnc/pncconf/pncconf-help \
-		$(DESTDIR)$(datadir)/linuxcnc/hallib
+		$(DESTDIR)$(datadir)/linuxcnc/hallib \
+		$(DESTDIR)$(datadir)/linuxcnc/iec
 
 install-kernel-indep: install-dirs
 ifeq ($(BUILD_MANPAGES),yes)
@@ -716,6 +717,7 @@ endif
 	$(EXE) ../scripts/sim_pin $(DESTDIR)$(bindir)
 	$(FILE) ../*.png ../*.gif $(DESTDIR)$(datadir)/linuxcnc
 	$(FILE) ../lib/hallib/*   $(DESTDIR)$(datadir)/linuxcnc/hallib
+	$(FILE) ../lib/iec/*.st  $(DESTDIR)$(datadir)/linuxcnc/iec
 ifeq ($(BUILD_GUI),yes)
 	$(FILE) ../tcl/*.png $(DESTDIR)$(tcldir)
 endif
