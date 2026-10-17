@@ -3249,10 +3249,9 @@ static int emctask_shutdown(void)
     }
     emcCommand = &emcNullCommand;
 
-    if (NULL != emcStatus) {
-	delete emcStatus;
-	emcStatus = NULL;
-    }
+    // dropped, not deleted - as with the NML status channel before: the embedded Python (task module)
+    // may still hold it while the process exits
+    emcStatus = NULL;
     return 0;
 }
 
