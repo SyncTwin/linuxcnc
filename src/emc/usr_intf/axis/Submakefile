@@ -1,17 +1,27 @@
 
-# The Python `linuxcnc` module (emcmodule.cc, an NML client) is gone with NML: clients talk to the
-# task over NATS (emc/task/tasknats.cc). The scripts that only drove it (linuxcnctop, mdi, lintini,
-# debuglevel, tracking-test) are gone with it.
+# The Python `linuxcnc` module keeps only what is not NML: linuxcnc.ini, constants, tool, backplot
+# helpers; stat / command / error_channel / positionlogger are gone - the task's bus is NATS
+# (emc/task/tasknats.cc). The scripts that only drove NML (linuxcnctop, mdi, lintini, debuglevel,
+# tracking-test) are gone with them.
+EMCMODULESRCS := emc/usr_intf/axis/extensions/emcmodule.cc
 TOGLMODULESRCS := emc/usr_intf/axis/extensions/_toglmodule.c
 TKDARMODULESRCS := emc/usr_intf/axis/extensions/tkdarmodule.c
-PYSRCS += $(TOGLMODULESRCS) $(TKDARMODULESRCS)
+PYSRCS += $(EMCMODULESRCS) $(TOGLMODULESRCS) $(TKDARMODULESRCS)
 
+EMCMODULE := ../lib/python/linuxcnc.so
 TOGLMODULE := ../lib/python/_togl.so
 TKDARMODULE := ../lib/python/tkdar.so
 
 $(call TOOBJSDEPS, $(TOGLMODULESRCS)) : EXTRAFLAGS = $(ULFLAGS) $(TCL_CFLAGS)
 
+$(call TOOBJSDEPS, $(EMCMODULESRCS)) : Makefile.inc
+
 $(call TOOBJSDEPS, $(TKDARMODULESRCS)) : EXTRAFLAGS = $(TCL_CFLAGS)
+
+$(EMCMODULE): $(call TOOBJS, $(EMCMODULESRCS)) ../lib/liblinuxcnc.a ../lib/libnml.so.0 \
+              ../lib/liblinuxcncini.so ../lib/libtooldata.so.0
+	$(ECHO) Linking python module $(notdir $@)
+	$(Q)$(CXX) $(LDFLAGS) -shared -o $@ $^ -L/usr/X11R6/lib -lm
 
 $(TOGLMODULE): $(call TOOBJS, $(TOGLMODULESRCS))
 	$(ECHO) Linking python module $(notdir $@)
@@ -21,6 +31,7 @@ $(TKDARMODULE): $(call TOOBJS, $(TKDARMODULESRCS))
 	$(ECHO) Linking python module $(notdir $@)
 	$(Q)$(CC) $(LDFLAGS) -shared -o $@ $(TCL_CFLAGS) $^ -lX11 $(TCL_LIBS)
 
+PYTARGETS += $(EMCMODULE)
 ifeq ($(BUILD_GUI),yes)
 PYTARGETS += $(TOGLMODULE) $(TKDARMODULE)
 endif
