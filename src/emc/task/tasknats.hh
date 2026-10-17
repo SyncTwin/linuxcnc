@@ -1,9 +1,8 @@
 /********************************************************************
 * Description: tasknats.hh
-*   Task status published to NATS as Sparkplug B, next to NML.
+*   Task status to NATS as Sparkplug B - the only bus of the task (no NML).
 *
-*   taskNatsCycle() runs in the task main loop right after the NML status
-*   write: it diffs the status against its last snapshot and pushes the
+*   taskNatsCycle() runs at the end of the task main loop: it diffs the status against its last snapshot and pushes the
 *   changes into a single-producer/single-consumer lock-free ring. A separate
 *   thread drains the ring and publishes. The task loop never waits on NATS:
 *   a full ring counts a drop and the change is retried on the next cycle.
@@ -15,7 +14,8 @@
 *   (group), NODE_ID + "-task" (node); INI [NATS] URL USER PASS GROUP NODE
 *   override, PUBLISH_PERIOD optional (default [TASK] CYCLE_TIME), PINS = <file>
 *   (relative to the INI's folder) - devices hal / scope. No URL - publishing
-*   off, said once in the log.
+*   - the task refuses to start
+*   (NATS is its only command source).
 *
 *   Commands: DCMD spBv1//0.<group>.DCMD.<node>.task|motion, one command per message =
 *   cmd/serial (Int64, growing) + one verb: task  state | mode | mdi | program/open |
@@ -32,19 +32,19 @@
 class EMC_STAT;
 class RCS_CMD_MSG;
 
-// 0 = publishing on or deliberately off; -1 = [NATS] present but refused (said in the log)
+// 0 = on; -1 = no URL or refused (said in the log) - the task cannot run, it has no other bus
 // hal_comp_id: the task's HAL component (iocontrol) - the sampler FIFO is attached with it
 int taskNatsInit(const char *inifile, int joints, double task_cycle_time, int hal_comp_id);
 void taskNatsCycle(const EMC_STAT *stat);
 void taskNatsShutdown(void);
 
-// Commands from NATS - the second source next to NML (DCMD of devices task / motion, see tasknats.cc).
-// Task main loop, only in a cycle in which NML brought no new command: the next message to plan
+// Commands from NATS - the only source (DCMD of devices task / motion, see tasknats.cc).
+// Task main loop, every cycle: the next message to plan
 // (emcCommand = it), one per cycle, or nullptr. The answer goes out as an event (task cmd/serial,
 // cmd/state RCS_DONE/EXEC/ERROR, cmd/error) from taskNatsCycle - no client polling.
 RCS_CMD_MSG *taskNatsCommand(void);
 // emcOperatorError / emcOperatorText / emcOperatorDisplay (kind 0 / 1 / 2) -> device task
-// operator/error|text|display (String), next to the NML error channel.
+// operator/error|text|display (String) - the only error channel.
 void taskNatsMessage(int kind, const char *text);
 
 #endif

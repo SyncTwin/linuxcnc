@@ -523,37 +523,12 @@ EMCTASK=$retval
 
 if [ "$EMCTASK" = emctask ]; then EMCTASK=linuxcnctask; fi
 
-# 2.6. we hardcode the server name, change if needed
-# linuxcncsvr now holds/creates all the NML channels,
-# so it needs to start by default, as the first process
-EMCSERVER=linuxcncsvr
-
-# 2.7. get halui information
-GetFromIniQuiet HALUI HAL
-HALUI=$retval
+# 2.6. no server, no halui, no display: NML is gone - the task's only bus is
+# NATS (tasknats: commands in, status out); HAL pins drive the rest. Headless.
 
 # 2.7.1 get halbridge info from INI
 GetFromIniQuiet HALBRIDGE HAL
 HALBRIDGE=$retval
-
-# 2.8. get display information
-GetFromIni DISPLAY DISPLAY
-# Intentional split to make it values of an array.
-# Then split the array into the program and its args.
-# shellcheck disable=SC2206
-__emcdisplay=( $retval )
-EMCDISPLAY="${__emcdisplay[*]:0:1}"
-EMCDISPLAYARGS=( "${__emcdisplay[@]:1}" )
-unset __emcdisplay
-
-case $EMCDISPLAY in
-    tkemc) EMCDISPLAY=tklinuxcnc ;;
-esac
-
-# 2.9. get NML config information
-GetFromIniEx NML_FILE LINUXCNC NML_FILE EMC @DEFAULT_NMLFILE@
-NMLFILE=$retval
-export NMLFILE
 
 # 2.10. INI information that may be needed by other apps in process tree
 GetFromIni COORDINATES TRAJ
@@ -642,18 +617,6 @@ function Cleanup() {
     echo "Shutting down and cleaning up LinuxCNC..."
     # Kill displays first - that should cause an orderly
     #   shutdown of the rest of linuxcnc
-    for KILL_TASK in linuxcncpanel iosh linuxcncsh linuxcncrsh linuxcnctop mdi debuglevel gmoccapy gscreen; do
-	if $PIDOF $KILL_TASK >> "$DEBUG_FILE" ; then
-	    KillTaskWithTimeout
-	fi
-    done
-
-    if program_available axis-remote ; then
-	if [ -n "$DISPLAY" ]; then
-	    axis-remote --ping && axis-remote --quit
-	fi
-    fi
-
     if [ "$1" = "other" ]; then
         echo -n "Waiting for other session to finish exiting..."
 	WAIT=$KILL_TIMEOUT
@@ -675,7 +638,7 @@ function Cleanup() {
     fi
 
     # now kill all the other user space components
-    for KILL_TASK in linuxcncsvr milltask motion-logger; do
+    for KILL_TASK in milltask motion-logger; do
 	if $PIDOF $KILL_TASK >> "$DEBUG_FILE" ; then
 	    KillTaskWithTimeout
 	fi
@@ -696,16 +659,6 @@ function Cleanup() {
 
     echo "Removing HAL_LIB, RTAPI, and Real Time OS modules" >> "$PRINT_FILE"
     $REALTIME stop
-
-    echo "Removing NML shared memory segments" >> "$PRINT_FILE"
-    # Most field are unused, ignore warning
-    # shellcheck disable=SC2034
-    while read -r b x t x x x x x x m x; do
-        case "$b$t" in
-            BSHMEM) ipcrm -M "$m" 2>/dev/null;;
-        esac
-    done < "$NMLFILE"
-
 
     # remove lock file
     if [ -f "$LOCKFILE" ] ; then
@@ -766,41 +719,11 @@ touch "$LOCKFILE"
 ################################################################################
 # 4.1. pop up intro graphic
 ################################################################################
-img=$($INIVAR -ini "$INIFILE" -var INTRO_GRAPHIC -sec DISPLAY 2>> "$DEBUG_FILE")
-imgtime=$($INIVAR -ini "$INIFILE" -var INTRO_TIME -sec DISPLAY 2>> "$DEBUG_FILE")
-if [ "$imgtime" = "" ] ; then
-  imgtime=5
-fi
-if [ "$img" != "" ] ; then
-  if [ -e "$img" ]; then
-    true
-  elif [ -e "$INI_DIR/$img" ]; then
-    img="$INI_DIR/$img"
-  elif [ -e "$LINUXCNC_IMAGEDIR/$img" ]; then
-    img="$LINUXCNC_IMAGEDIR/$img"
-  else
-    img=
-  fi
-fi
-if [ "$img" != "" ] ; then
-    if [ -x "$LINUXCNC_TCL_DIR/bin/popimage" ] ; then
-        "$LINUXCNC_TCL_DIR/bin/popimage" "$img" "$imgtime" &
-    fi
-fi
- 
 ################################################################################
 # 4.2. Now we can finally start loading LinuxCNC
 ################################################################################
 
-# 4.3.1. Run linuxcncserver in background, always (it owns/creates the NML buffers)
-echo "Starting LinuxCNC server program: $EMCSERVER" >> "$PRINT_FILE"
-if ! program_available "$EMCSERVER"; then
-    echo "Can't execute server program $EMCSERVER"
-    Cleanup
-    exit 1
-fi
 INI_FILE_NAME="$INIFILE"; export INI_FILE_NAME
-$EMCSERVER -ini "$INIFILE"
 
 # 4.3.2. Start REALTIME
 echo "Loading Real Time OS, RTAPI, and HAL_LIB modules" >> "$PRINT_FILE"
@@ -829,17 +752,6 @@ if ! program_available "$EMCTASK" ; then
 fi
 
 halcmd loadusr -Wn inihal "$EMCTASK" -ini "$INIFILE"
-
-# 4.3.5. Run halui in background, if necessary
-if [ -n "$HALUI" ] ; then
-    echo "Starting HAL User Interface program: $HALUI" >> "$PRINT_FILE"
-    if ! program_available "$HALUI" ; then
-	echo "Can't execute halui program $HALUI"
-	Cleanup
-	exit 1
-    fi
-    $HALCMD loadusr -Wn halui "$HALUI" -ini "$INIFILE"
-fi
 
 # run hal bridge program IF requested
 if [ -n "$HALBRIDGE" ] ; then
@@ -968,49 +880,16 @@ while (( $("$AWK" 'BEGIN {print ('"$chk"' == 0)}') )); do
     chk=$(halcmd getp ini.traj_max_velocity)
 done
 
-# 4.3.11. Run display in foreground
-echo "Starting DISPLAY program: $EMCDISPLAY" >> "$PRINT_FILE"
+# 4.3.11. Headless: no display. LinuxCNC runs while the task does; it ends on
+# SIGINT/SIGTERM (trap above -> Cleanup) or when the task exits.
+echo "Headless: no DISPLAY, the task's bus is NATS" >> "$PRINT_FILE"
 result=0
-case $EMCDISPLAY in
-  tklinuxcnc)
-    # tklinuxcnc is in the tcl directory, not the bin directory
-    if [ ! -x "$LINUXCNC_TCL_DIR/$EMCDISPLAY.tcl" ] ; then
-	echo "Can't execute DISPLAY program $LINUXCNC_TCL_DIR/$EMCDISPLAY.tcl ${EMCDISPLAYARGS[*]}"
-	Cleanup
-	exit 1
-    fi
-    "$LINUXCNC_TCL_DIR/$EMCDISPLAY.tcl" -ini "$INIFILE" "${EMCDISPLAYARGS[@]}"
-    result=$?
-  ;;
-  dummy)
-    # dummy display just waits for <ENTER>
-    echo "DUMMY DISPLAY MODULE, press <ENTER> to continue."
-    read -r ;
-  ;;
+while $PIDOF "$EMCTASK" >> "$DEBUG_FILE" ; do
+    sleep 1
+done
+echo "TASK program $EMCTASK exited" | tee -a "$PRINT_FILE" "$DEBUG_FILE"
+result=1
 
-  linuxcncrsh)
-    if ! program_available "$EMCDISPLAY"; then
-      echo "Can't execute DISPLAY program $EMCDISPLAY ${EMCDISPLAYARGS[*]} ${EXTRA_ARGS[*]}"
-      Cleanup
-      exit 1
-    fi
-    $EMCDISPLAY "${EMCDISPLAYARGS[@]}" "${EXTRA_ARGS[@]}" -- -ini "$INIFILE"
-    result=$?
-  ;;
-  *)
-    # all other displays are assumed to be commands on the PATH
-    if ! program_available "$EMCDISPLAY"; then
-        echo "Can't execute DISPLAY program $EMCDISPLAY ${EMCDISPLAYARGS[*]} ${EXTRA_ARGS[*]}"
-        Cleanup
-        exit 1
-    fi
-    $EMCDISPLAY -ini "$INIFILE" "${EMCDISPLAYARGS[@]}" "${EXTRA_ARGS[@]}"
-    result=$?
-  ;;
-esac
-
-# the display won't return until you shut it down,
-# so when you get here it's time to clean up
 Cleanup
 
 exit $result

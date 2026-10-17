@@ -1,7 +1,7 @@
 /********************************************************************
 * Description: tasknats.cc
-*   Task status -> NATS, Sparkplug B 3.0 (protobuf), next to the NML status
-*   channel. See tasknats.hh for the contract.
+*   Task status -> NATS, Sparkplug B 3.0 (protobuf); NATS is the task's only
+*   command source and status sink (no NML channels). See tasknats.hh for the contract.
 *
 *   The node itself - connection, NBIRTH/NDEATH, Rebirth, snapshot, devices hal
 *   and scope of [NATS] PINS - is the halnats library (hal/utils/halnats), the
@@ -26,24 +26,7 @@
 #include "libnml/rcs/rcs_print.hh"
 
 #ifndef HAVE_LIBNATS
-
-#include <inifile.hh>
-#include <stdlib.h>
-
-int taskNatsInit(const char *inifile, int, double, int)
-{
-    linuxcnc::IniFile ini(inifile);
-    const char *env = getenv("SYNCTWIN_NATS_URL");
-    if ((ini && ini.findString("URL", "NATS")) || (env && *env))
-        rcs_print("task: a NATS URL is set but this milltask is built without libnats - "
-                  "status goes to NML only\n");
-    return 0;
-}
-void taskNatsCycle(const EMC_STAT *) {}
-void taskNatsShutdown(void) {}
-RCS_CMD_MSG *taskNatsCommand(void) { return nullptr; }
-void taskNatsMessage(int, const char *) {}
-
+#error "milltask needs libnats + protobuf-c (configure --with-nats): NML is gone, NATS is the task's only command source and status sink"
 #else
 
 #include <atomic>
@@ -285,17 +268,15 @@ void build_defs(int joints, int spindles)
     }
 }
 
-// ---- commands: DCMD of task / motion -> the task loop (second source next to NML) ----
+// ---- commands: DCMD of task / motion -> the task loop (the only command source) ----
 //
-// The NATS delivery threads (one per device) parse a DCMD into NML messages - the very messages
-// the Python linuxcnc.command builds - and push it into a lock-free ring (producers serialized by
-// cmx, the task loop pops without a lock). The task takes ONE message per cycle, only in a cycle
-// in which NML brought nothing new, and plans it exactly like an NML command (emcTaskPlan: every
-// state / mode / interlock check of NML applies; nothing is bypassed).
+// The NATS delivery threads (one per device) parse a DCMD into EMC messages (the emc.hh classes the
+// planner takes) and push it into a lock-free ring (producers serialized by cmx, the task loop pops
+// without a lock). The task takes ONE message per cycle and plans it (emcTaskPlan: every state /
+// mode / interlock check applies; nothing is bypassed).
 // Serial: the sender's cmd/serial must grow (a repeat or an old one is refused - a resend is
-// harmless); inside the task the message carries a NEGATIVE serial of its own, so it can never
-// equal an NML serial (NML write ids are positive) and the planner's "new command" test
-// (serial != echo) stays exact across the two sources.
+// harmless); inside the task the message carries a NEGATIVE serial of its own, never 0 (the null
+// command the task starts with), so the planner's "new command" test (serial != echo) is exact.
 // Priority lane (as Abort above all in PLCopen / ISA-88): state ESTOP and abort go to a ring of
 // their own that the task takes first - ahead of the queue and of the rest of the command in hand.
 // What they overtake is aborted, not left hanging: the command in hand and the commands queued
@@ -502,7 +483,7 @@ void answer_cycle(const EMC_STAT *stat)
     // DONE / ERROR is the command's last answer: a later error of the machine is not this command's
     if (c_rep_state == (int)RCS_STATUS::DONE || c_rep_state == (int)RCS_STATUS::ERROR) return;
     int st;
-    if (stat->echo_serial_number != c_cur_internal) st = c_rep_state;   // superseded (NML): the last answer stands
+    if (stat->echo_serial_number != c_cur_internal) st = c_rep_state;   // not echoed yet / superseded: the last answer stands
     else if (c_next < c_cur->msgs.size()) st = stat->status == RCS_STATUS::ERROR ? (int)RCS_STATUS::ERROR : (int)RCS_STATUS::EXEC;
     else st = (int)stat->status;
     if (st == c_rep_state || st < 0) return;
@@ -646,7 +627,12 @@ int taskNatsInit(const char *inifile, int joints, double task_cycle_time, int ha
     c.log = log_line;
     // the publisher's period: [NATS] PUBLISH_PERIOD, else the task cycle (one publish per task cycle at most)
     int r = halnats::configure(c, inifile, "-task", task_cycle_time);
-    if (r) return r > 0 ? 0 : -1;
+    if (r > 0) {
+        rcs_print_error("task: no NATS URL ([NATS] URL or SYNCTWIN_NATS_URL) - NATS is the only command "
+                        "source and status sink (no NML), the task cannot run without it\n");
+        return -1;
+    }
+    if (r) return -1;
 
     // [TRAJ] SPINDLES: LinuxCNC's own default is 1 (motion's num_spindles)
     linuxcnc::IniFile ini(inifile);
