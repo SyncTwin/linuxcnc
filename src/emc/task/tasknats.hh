@@ -25,8 +25,8 @@
 *   1.0 = 100 % | maxvel (machine units / s) - the NML messages of linuxcnc.command's namesakes.
 *   state ESTOP and abort take a priority lane ahead of the queue; a full queue answers ERROR.
 *
-*   Metrics (DBIRTH full, DDATA on change): task, motion (traj, joint/<j>/*, axis/<a>/velocity,
-*   spindle/<n>/*, synch_di/<n> synch_do/<n> (Boolean) and analog_input/<n> analog_output/<n>
+*   Metrics (DBIRTH full, DDATA on change): task, motion (traj, joint/<j>/..., axis/<a>/velocity,
+*   spindle/<n>/..., synch_di/<n> synch_do/<n> (Boolean) and analog_input/<n> analog_output/<n>
 *   (Double) for the motmod num_dio / num_aio there are), io, config, interp - EMC_STAT names.
 *   The overrides answer in motion/scale, motion/rapid_scale, motion/spindle/<n>/spindle_scale,
 *   config/maxVelocity.
