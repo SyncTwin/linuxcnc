@@ -197,7 +197,7 @@ pin in real pos_fb "cia402.N.pos-fb";
 pin in sint drv_torque "drive actual torque 0x6077 (per mille of rated), raw from the bus";
 pin in real drv_velocity "cia402.N.velocity-fb (machine units/s)";
 pin in uint drv_statusword "drive statusword 0x6041, raw from the bus";
-pin in uint drive_error "drive error code 0x603F as read, 0 = no fault (not interpreted: it is the Value of alarm-id, alarm-value)";
+pin in uint drive_error "drive error code 0x603F as read, 0 = no fault (not interpreted: it is the Value of alarm-value and warning-value)";
 
 // ---- to the drive (e.g. cia402)
 pin out real pos_cmd "to cia402.N.pos-cmd";
@@ -224,11 +224,12 @@ pin out bool in_velocity "velocity mode reached its target velocity";
 pin out bool error;
 pin out sint error_id "outcome of the newest command: refusal code, else the ErrorStop reason";
 pin out sint axis_error_id "MC_ReadAxisError: why the axis is in ErrorStop, 0 outside it";
-pin out sint alarm_id "PackTags Admin.Alarm[i].ID of the axis: axis-error-id in ErrorStop, else E_DRIVE_WARNING while the drive's statusword bit 7 (warning) is up and the axis goes on, 0 otherwise";
+pin out sint alarm_id "PackTags Admin.Alarm[i].ID of the axis: axis-error-id in ErrorStop, 0 otherwise";
 pin out sint alarm_value "PackTags Admin.Alarm[i].Value: the drive's error code 0x603F (drive-error) while alarm-id != 0, 0 otherwise";
-pin out sint alarm_category "PackTags Admin.Alarm[i].Category: category-alarm in ErrorStop, category-warning on a drive warning, 0 without an alarm";
+pin out sint alarm_category "PackTags Admin.Alarm[i].Category: category-alarm while alarm-id != 0, 0 otherwise";
 param rw sint category_alarm "Category number of an axis alarm (ErrorStop): the print's (one home of the numbers), not this component's";
-param rw sint category_warning "Category number of a drive warning (bit 7, no stop): the print's, not this component's";
+pin out sint warning_id "PackTags Admin.Warning[i].ID of the axis (ISA-TR88.00.02): E_DRIVE_WARNING while the drive's statusword bit 7 (warning) is up outside ErrorStop — the axis goes on — 0 otherwise";
+pin out sint warning_value "PackTags Admin.Warning[i].Value: the drive's error code 0x603F (drive-error) while warning-id != 0, 0 otherwise";
 pin out uint command_id "number of the newest command (rising edge of execute/halt/stop/reset/home); busy/done/error/command-aborted/error-id belong to it";
 pin out uint done_id "number of the last command that completed (Done)";
 pin out uint aborted_id "number of the last command aborted by another command or by power-off (CommandAborted)";
@@ -305,7 +306,7 @@ function _;
 #define E_UNKNOWN_MODE 8
 #define E_HOMING_ERROR 9
 #define E_SYNC_STEP_OVER_MAXV 10
-/* not an ErrorStop reason: the Admin.Alarm ID of a drive warning (statusword bit 7) — the axis goes on, never latched */
+/* not an ErrorStop reason: the Admin.Warning ID of a drive warning (statusword bit 7) — the axis goes on, never latched */
 #define E_DRIVE_WARNING 11
 
 #define RUN_NONE 0
@@ -747,12 +748,13 @@ FUNCTION(_) {
     if (busy && !run_id) run_id = command_id;
     if (cmd_err && (ex_edge || halt_edge || stop_edge || home_edge || reset_edge || set_edge)) failed_id_set(command_id);
     axis_error_id_set(err_latched);
-    {   /* Admin.Alarm of the axis (PackML: a warning names itself without a stop; a fault is the ErrorStop) */
+    {   /* ISA-TR88.00.02: Admin.Alarm — the fault (ErrorStop); Admin.Warning — a drive warning, the axis goes on */
         int warn = !err_latched && ((drv_statusword >> 7) & 1);
-        int id = err_latched ? err_latched : warn ? E_DRIVE_WARNING : 0;
-        alarm_id_set(id);
-        alarm_value_set(id ? (rtapi_s32)drive_error : 0);
-        alarm_category_set(err_latched ? category_alarm : warn ? category_warning : 0);
+        alarm_id_set(err_latched);
+        alarm_value_set(err_latched ? (rtapi_s32)drive_error : 0);
+        alarm_category_set(err_latched ? category_alarm : 0);
+        warning_id_set(warn ? E_DRIVE_WARNING : 0);
+        warning_value_set(warn ? (rtapi_s32)drive_error : 0);
     }
 
     actual_position_set(pos_fb + off);
