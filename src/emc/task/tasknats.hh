@@ -20,8 +20,16 @@
 *   Commands: DCMD spBv1//0.<group>.DCMD.<node>.task|motion, one command per message =
 *   cmd/serial (Int64, growing) + one verb: task  state | mode | mdi | program/open |
 *   program/run | program/pause | program/resume | program/step | abort; motion  home | unhome |
-*   teleop | jog/stop | jog/continuous | jog/increment (+ jog/joint, jog/velocity, jog/distance).
+*   teleop | jog/stop | jog/continuous | jog/increment (+ jog/joint, jog/velocity, jog/distance) |
+*   feedrate | rapidrate | spindleoverride (+ spindleoverride/spindle, default 0) - a fraction,
+*   1.0 = 100 % | maxvel (machine units / s) - the NML messages of linuxcnc.command's namesakes.
 *   state ESTOP and abort take a priority lane ahead of the queue; a full queue answers ERROR.
+*
+*   Metrics (DBIRTH full, DDATA on change): task, motion (traj, joint/<j>/*, axis/<a>/velocity,
+*   spindle/<n>/*, synch_di/<n> synch_do/<n> (Boolean) and analog_input/<n> analog_output/<n>
+*   (Double) for the motmod num_dio / num_aio there are), io, config, interp - EMC_STAT names.
+*   The overrides answer in motion/scale, motion/rapid_scale, motion/spindle/<n>/spindle_scale,
+*   config/maxVelocity.
 *
 * License: GPL Version 2
 * Copyright (c) 2026 SyncTwin Technologies

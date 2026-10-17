@@ -63,6 +63,8 @@ void taskNatsMessage(int, const char *) {}
 #include <rtapi_string.h>                        // rtapi_strlcpy()
 #include "nml_intf/emc.hh"
 #include "nml_intf/emc_nml.hh"
+#include "motion/usrmotintf.h"            // usrmotReadEmcmotConfig(): num_dio / num_aio
+#include "motion/motion.h"
 
 using halnats::Val;
 using halnats::Metric;
@@ -145,7 +147,7 @@ double pose_get(const EmcPose &p, int k)
     for (int k = 0; k < 9; k++) \
         AR(d, std::string(base) + "/" + pose_name[k], pose_get(s->member, k))
 
-void build_defs(int joints, int spindles)
+void build_defs(int joints, int spindles, int dio, int aio)
 {
     // task
     AI(D_TASK, "mode", s->task.mode);
@@ -242,6 +244,16 @@ void build_defs(int joints, int spindles)
         AI(D_MOTION, b + "orient_fault", s->motion.spindle[n].orient_fault);
         AB(D_MOTION, b + "spindle_override_enabled", s->motion.spindle[n].spindle_override_enabled);
         AB(D_MOTION, b + "homed", s->motion.spindle[n].homed);
+    }
+    // motion's digital / analog IO (M62-M68, motion.digital-in-NN / -out-NN, analog-in-NN / -out-NN):
+    // the motmod num_dio / num_aio there are, not EMCMOT_MAX_* - an IO that does not exist is not a zero
+    for (int n = 0; n < dio; n++) {
+        AB(D_MOTION, "synch_di/" + std::to_string(n), s->motion.synch_di[n]);
+        AB(D_MOTION, "synch_do/" + std::to_string(n), s->motion.synch_do[n]);
+    }
+    for (int n = 0; n < aio; n++) {
+        AR(D_MOTION, "analog_input/" + std::to_string(n), s->motion.analog_input[n]);
+        AR(D_MOTION, "analog_output/" + std::to_string(n), s->motion.analog_output[n]);
     }
 
     // io
@@ -395,11 +407,12 @@ bool metric_true(const Metric *m) { return m->value_case == HN_V(BOOLEAN_VALUE) 
 
 // One DCMD -> NCmd. Device task: state | mode | mdi | program/open | program/run | program/pause |
 // program/resume | program/step | abort; device motion: home | unhome | teleop | jog/stop |
-// jog/continuous | jog/increment (+ jog/joint, jog/velocity, jog/distance). Exactly one verb + cmd/serial.
+// jog/continuous | jog/increment (+ jog/joint, jog/velocity, jog/distance) | feedrate | rapidrate |
+// spindleoverride (+ spindleoverride/spindle) | maxvel. Exactly one verb + cmd/serial.
 // The values and the checks are the Python linuxcnc.command's (emcmodule.cc), nothing more.
 std::string parse_cmd(size_t dev, const SparkplugB__Payload *pl, NCmd &c, bool &has_serial)
 {
-    const Metric *verb = nullptr, *jj = nullptr, *jv = nullptr, *jd = nullptr;
+    const Metric *verb = nullptr, *jj = nullptr, *jv = nullptr, *jd = nullptr, *sn = nullptr;
     has_serial = false;
     for (size_t n = 0; n < pl->n_metrics; n++) {
         const Metric *m = pl->metrics[n];
@@ -409,6 +422,7 @@ std::string parse_cmd(size_t dev, const SparkplugB__Payload *pl, NCmd &c, bool &
         else if (dev == D_MOTION && nm == "jog/joint") jj = m;
         else if (dev == D_MOTION && nm == "jog/velocity") jv = m;
         else if (dev == D_MOTION && nm == "jog/distance") jd = m;
+        else if (dev == D_MOTION && nm == "spindleoverride/spindle") sn = m;
         else if (verb) return "one command per DCMD (" + std::string(verb->name) + " and " + nm + ")";
         else verb = m;
     }
@@ -467,6 +481,20 @@ std::string parse_cmd(size_t dev, const SparkplugB__Payload *pl, NCmd &c, bool &
         if (v == "jog/stop") { auto *m = new EMC_JOG_STOP; m->joint_or_axis = (int)i; m->jjogmode = jm; put(m); }
         else if (v == "jog/continuous") { auto *m = new EMC_JOG_CONT; m->joint_or_axis = (int)i; m->vel = vel; m->jjogmode = jm; put(m); }
         else { auto *m = new EMC_JOG_INCR; m->joint_or_axis = (int)i; m->vel = vel; m->incr = inc; m->jjogmode = jm; put(m); }
+    } else if (v == "feedrate" || v == "rapidrate" || v == "maxvel") {
+        // a fraction (1.0 = 100 %) / maxvel in machine units per second, as linuxcnc.command takes them
+        double d = 0;
+        if (!metric_real(verb, d)) return v + ": a finite number";
+        if (v == "feedrate") { auto *m = new EMC_TRAJ_SET_SCALE; m->scale = d; put(m); }
+        else if (v == "rapidrate") { auto *m = new EMC_TRAJ_SET_RAPID_SCALE; m->scale = d; put(m); }
+        else { auto *m = new EMC_TRAJ_SET_MAX_VELOCITY; m->velocity = d; put(m); }
+    } else if (v == "spindleoverride") {
+        double d = 0;
+        int64_t sp = 0;                          // linuxcnc.command's default: spindle 0
+        if (!metric_real(verb, d)) return v + ": a finite number (1.0 = 100 %)";
+        if (sn && (!metric_int(sn, sp) || sp < 0 || sp >= EMCMOT_MAX_SPINDLES))
+            return v + ": spindleoverride/spindle 0.." + std::to_string(EMCMOT_MAX_SPINDLES - 1);
+        auto *m = new EMC_TRAJ_SET_SPINDLE_SCALE; m->scale = d; m->spindle = (int)sp; put(m);
     } else return "unknown command of device motion: " + v;
     return "";
 }
@@ -660,7 +688,16 @@ int taskNatsInit(const char *inifile, int joints, double task_cycle_time, int ha
     if (joints < 0 || joints > EMCMOT_MAX_JOINTS) joints = EMCMOT_MAX_JOINTS;
     if (spindles < 0 || spindles > EMCMOT_MAX_SPINDLES) spindles = EMCMOT_MAX_SPINDLES;
 
-    build_defs(joints, spindles);
+    // motmod num_dio / num_aio: from motion's config (shared memory is up after emctask_startup)
+    int dio = 0, aio = 0;
+    emcmot_config_t mc;
+    if (0 == usrmotReadEmcmotConfig(&mc)) {
+        dio = mc.numDIO < 0 ? 0 : mc.numDIO > EMCMOT_MAX_DIO ? EMCMOT_MAX_DIO : mc.numDIO;
+        aio = mc.numAIO < 0 ? 0 : mc.numAIO > EMCMOT_MAX_AIO ? EMCMOT_MAX_AIO : mc.numAIO;
+    } else
+        log_line(true, "task: NATS - motion's config not read, motion synch_di/do and analog_input/output not published\n");
+
+    build_defs(joints, spindles, dio, aio);
     size_t n = defs.size();
     size_t ns = sdefs.size();
     sprev.assign(ns, std::string()); sprev_ok.assign(ns, 0);
