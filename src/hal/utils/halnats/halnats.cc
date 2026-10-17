@@ -29,6 +29,7 @@
 * Copyright (c) 2026 SyncTwin Technologies
 ********************************************************************/
 #include "halnats.hh"
+#include "halnats_err.hh"
 
 #include <atomic>
 #include <cmath>
@@ -98,6 +99,9 @@ bool born = false;                               // under mx: births of this con
 int64_t bdseq = 0;
 uint64_t seq = 0;
 double last_pub = 0;                             // under mx: CLOCK_MONOTONIC of the last seq message
+ErrWatch errw;                                   // async errors of the connection (halnats_err.hh)
+uint64_t errs_sent = 0;                          // under mx: publisher/errors last put to the broker
+std::string s_ndata;
 std::string s_nbirth, s_ndeath, s_ncmd, s_dcmd_hal, s_snapshot;
 std::vector<std::string> s_dbirth, s_ddata;      // owner devices, then hal, scope
 size_t d_hal = 0, d_scope = 0;
@@ -282,6 +286,17 @@ void scope_birth()
     send(s_dbirth[d_scope], b, true);
 }
 
+// publisher health: errors of the broker connection and the last one; `le` keeps the string alive
+void add_err_metrics(Batch &b, std::string &le)
+{
+    errs_sent = errw.total();
+    le = errw.last();
+    Metric &e = b.add("publisher/errors", 0, HN_DT(Int64), 0);
+    e.value_case = HN_V(LONG_VALUE); e.long_value = errs_sent;
+    Metric &l = b.add("publisher/last_error", 0, HN_DT(String), 0);
+    l.value_case = HN_V(STRING_VALUE); l.string_value = (char *)le.c_str();
+}
+
 void births()
 {
     seq = 0;
@@ -290,6 +305,8 @@ void births()
     m0.value_case = HN_V(LONG_VALUE); m0.long_value = bdseq;
     Metric &m1 = nb.add("Node Control/Rebirth", 0, HN_DT(Boolean), 0);
     m1.value_case = HN_V(BOOLEAN_VALUE); m1.boolean_value = 0;
+    std::string le;
+    add_err_metrics(nb, le);
     send(s_nbirth, nb, true);
     if (own)
         for (size_t d = 0; d < own->devices().size(); d++) {
@@ -445,6 +462,7 @@ void on_connected(natsConnection *, void *)
 void on_disconnected(natsConnection *, void *)
 {
     say(false, "%s: NATS disconnected\n", tag());
+    errw.note("disconnect", "связь с брокером NATS потеряна");
     std::lock_guard<std::mutex> g(mx);
     born = false;                                // no DDATA of a dead session; births on reconnect
 }
@@ -465,6 +483,12 @@ void publisher()
                             own->data(d, b);
                             if (!b.ms.empty()) send(s_ddata[d], b, true);
                         }
+                    if (errw.total() != errs_sent) {     // NDATA by exception: only when the count moved
+                        Batch b;
+                        std::string le;
+                        add_err_metrics(b, le);
+                        send(s_ndata, b, true);
+                    }
                     if (!hpins.empty()) {
                         if (!hal_born) { if (hal_all_ok()) hal_birth(); }
                         else hal_datas();
@@ -737,6 +761,7 @@ int start(const Config &c, int hal_comp_id, Owner *owner)
     const std::string base = "spBv1//0." + cfg.group + ".";
     s_nbirth = base + "NBIRTH." + cfg.node;
     s_ndeath = base + "NDEATH." + cfg.node;
+    s_ndata = base + "NDATA." + cfg.node;
     std::vector<std::string> devs;
     if (own) devs = own->devices();
     d_hal = devs.size(); devs.push_back("hal");
@@ -758,6 +783,7 @@ int start(const Config &c, int hal_comp_id, Owner *owner)
     // connect in the background: the owner never waits on the network, not even at startup
     if (st == NATS_OK) st = natsOptions_SetRetryOnFailedConnect(opts, true, on_connected, nullptr);
     if (st == NATS_OK) st = natsOptions_SetReconnectedCB(opts, on_connected, nullptr);
+    if (st == NATS_OK) st = natsOptions_SetErrorHandler(opts, on_async_error, &errw);
     if (st == NATS_OK) st = natsOptions_SetDisconnectedCB(opts, on_disconnected, nullptr);
     if (st == NATS_OK) {
         st = natsConnection_Connect(&nc, opts);
