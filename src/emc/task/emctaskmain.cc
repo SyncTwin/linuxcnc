@@ -3462,14 +3462,20 @@ int main(int argc, char *argv[])
 
         check_ini_hal_items(emcStatus->motion.traj.joints);
 	// read command: NATS is the only source - one message per cycle
-	if (RCS_CMD_MSG *nats_cmd = taskNatsCommand()) {
-	    // got a new command, so clear out errors
+	bool nats_imm = false;
+	if (RCS_CMD_MSG *nats_cmd = taskNatsCommand(&nats_imm)) {
 	    emcCommand = nats_cmd;
-	    taskPlanError = 0;
-	    taskExecuteError = 0;
+	    if (!nats_imm) {
+		// got a new command, so clear out errors (an immediate one keeps those of the command in hand)
+		taskPlanError = 0;
+		taskExecuteError = 0;
+	    }
 	}
 	// run control cycle
-	if (0 != emcTaskPlan()) {
+	int plan_rc = emcTaskPlan();
+	if (nats_imm) {
+	    taskNatsPlanned(plan_rc);           // the immediate command answers for itself
+	} else if (0 != plan_rc) {
 	    taskPlanError = 1;
 	}
 	if (0 != emcTaskExecute()) {

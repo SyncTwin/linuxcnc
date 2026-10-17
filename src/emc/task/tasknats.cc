@@ -292,6 +292,13 @@ void build_defs(int joints, int spindles, int dio, int aio)
 // One at a time: the next queued command is planned only after the final answer (DONE / ERROR) of
 // the one in hand - every cmd/serial gets exactly one final answer, and an MDI line holds the
 // queue until its move is done.
+// Immediate lane (the task's own "immediate commands": emcTaskPlan issues them at once, beside a
+// running program - see immediate_type): they go to a ring of their own, are planned without
+// waiting for the final answer of the command in hand and answer for themselves in the cycle they
+// are planned (the plan's result, emcTaskPlan's return); the command in hand keeps running and gets
+// its own final answer from the task's status - program/run paused by program/pause stays EXEC and
+// ends DONE when the program does. Between the queue and the immediate lane cmd/serial order holds
+// while nothing is in hand; while a command is in hand, immediate ones overtake the queue.
 // Priority lane (as Abort above all in PLCopen / ISA-88): state ESTOP and abort go to a ring of
 // their own that the task takes first - ahead of the queue and of the rest of the command in hand.
 // What they overtake is aborted, not left hanging: the command in hand and the commands queued
@@ -304,6 +311,7 @@ void build_defs(int joints, int spindles, int dio, int aio)
 struct NCmd {
     int64_t serial = 0;                          // the sender's cmd/serial
     bool prio = false;                           // state ESTOP | abort: the priority lane
+    bool imm = false;                            // immediate_type: the immediate lane
     std::string verb;                            // the verb, for the answers of what it aborts
     std::vector<std::unique_ptr<RCS_CMD_MSG>> msgs;  // program/open = CLOSE + OPEN
     std::string refused;                         // non-empty: answered RCS_ERROR, nothing planned
@@ -321,6 +329,7 @@ struct CmdRing {
     void drop_front() { tail.store(tail.load(std::memory_order_relaxed) + 1, std::memory_order_release); }
 };
 CmdRing cring;                                   // sized by taskNatsInit: [TASK] MDI_QUEUED_COMMANDS
+CmdRing iring;                                   // immediate lane, sized as cring
 CmdRing pring(8);                                // ПРЕДПОЛОЖЕНИЕ, не замер: 8 E-STOP / abort between two task cycles
 std::mutex cmx;                                  // producers only (NATS delivery threads)
 int64_t c_last_serial = INT64_MIN;               // under cmx: the last accepted cmd/serial
@@ -334,6 +343,10 @@ int c_cur_internal = 0;                          // the internal serial of c_cur
 int c_rep_state = -1;                            // the last answered state of c_cur (-1 = none yet)
 int c_status_seen = -1;                          // emcStatus->status at the end of the last cycle
 std::string c_err;                               // the operator errors raised while c_cur runs
+bool c_sup = false;                              // c_cur overtaken by an immediate command: its answer from the task's status
+std::unique_ptr<NCmd> c_imm;                     // the immediate command last handed (alive while it is emcCommand)
+bool c_imm_open = false;                         // c_imm handed, its plan's result not yet answered
+std::string c_imm_err;                           // the operator errors raised while c_imm is planned
 
 // ---- events: answers and operator messages -> device task (lock-free ring, producer lock emx) ----
 enum EvKind { EV_CMD, EV_ERROR, EV_TEXT, EV_DISPLAY };
@@ -388,6 +401,30 @@ bool metric_real(const Metric *m, double &v)
     return false;
 }
 bool metric_true(const Metric *m) { return m->value_case == HN_V(BOOLEAN_VALUE) && m->boolean_value; }
+
+// The task's immediate commands that may come beside a running program - from the task itself:
+// emcTaskPlan (emctaskmain.cc) issues these by emcTaskIssueCommand at once in all three states of a
+// running program (ON, AUTO, interpState READING / WAITING / PAUSED; PLAN_STEP is handled there in
+// all three), never through interp_list ("Immediate commands, i.e., commands sent from calls to
+// emcTaskIssueCommand() in emcTaskPlan() directly" - emcTaskCheckPreconditions). Of that list
+// SET_MODE, SET_STATE and ABORT stay out: they abort the running program (emcTaskSetMode MDI ->
+// emcTaskAbort, emctask.cc; state OFF / ESTOP; abort) - state ESTOP and abort have the priority lane.
+bool immediate_type(NMLTYPE t)
+{
+    switch (t) {
+    case EMC_TASK_PLAN_PAUSE_TYPE:
+    case EMC_TASK_PLAN_RESUME_TYPE:
+    case EMC_TASK_PLAN_STEP_TYPE:
+    case EMC_TRAJ_SET_SCALE_TYPE:
+    case EMC_TRAJ_SET_RAPID_SCALE_TYPE:
+    case EMC_TRAJ_SET_MAX_VELOCITY_TYPE:
+    case EMC_TRAJ_SET_SPINDLE_SCALE_TYPE:
+    case EMC_JOINT_UNHOME_TYPE:
+        return true;
+    default:
+        return false;
+    }
+}
 
 // One DCMD -> NCmd. Device task: state | mode | mdi | program/open | program/run | program/pause |
 // program/resume | program/step | abort; device motion: home | unhome | teleop | jog/stop |
@@ -488,6 +525,7 @@ void on_command(size_t dev, const SparkplugB__Payload *pl)
     std::unique_ptr<NCmd> c(new NCmd);
     bool has_serial = false;
     std::string bad = parse_cmd(dev, pl, *c, has_serial);
+    c->imm = bad.empty() && c->msgs.size() == 1 && immediate_type(c->msgs[0]->_type);
     std::lock_guard<std::mutex> g(cmx);
     if (bad.empty() && c->serial <= c_last_serial)
         bad = "cmd/serial " + std::to_string(c->serial) + " not after " + std::to_string(c_last_serial) + " (repeat ignored)";
@@ -497,9 +535,9 @@ void on_command(size_t dev, const SparkplugB__Payload *pl)
         rcs_print_error("task: NATS DCMD %s refused: %s\n", dev_names[dev].c_str(), bad.c_str());
         if (!has_serial) return;                 // nothing to answer to
     }
-    CmdRing &r = c->prio ? pring : cring;
+    CmdRing &r = c->prio ? pring : c->imm ? iring : cring;
     if (r.full()) {                              // refused with an answer; c_last_serial untouched: a resend is accepted
-        std::string why = std::string(c->prio ? "priority " : "") + "command queue full: "
+        std::string why = std::string(c->prio ? "priority " : c->imm ? "immediate " : "") + "command queue full: "
                         + std::to_string(r.slot.size()) + " commands not yet taken by the task"
                         + (c->prio ? "" : " ([TASK] MDI_QUEUED_COMMANDS)");
         rcs_print_error("task: NATS DCMD %s cmd/serial %lld refused: %s\n", dev_names[dev].c_str(), (long long)c->serial, why.c_str());
@@ -518,7 +556,8 @@ void answer_cycle(const EMC_STAT *stat)
     // DONE / ERROR is the command's last answer: a later error of the machine is not this command's
     if (c_rep_state == (int)RCS_STATUS::DONE || c_rep_state == (int)RCS_STATUS::ERROR) return;
     int st;
-    if (stat->echo_serial_number != c_cur_internal) st = c_rep_state;   // not echoed yet / superseded: the last answer stands
+    if (c_sup) st = (int)stat->status;          // overtaken: the task's status is the command in hand's (the immediate one's errors are its own)
+    else if (stat->echo_serial_number != c_cur_internal) st = c_rep_state;   // not echoed yet / superseded: the last answer stands
     else if (c_next < c_cur->msgs.size()) st = stat->status == RCS_STATUS::ERROR ? (int)RCS_STATUS::ERROR : (int)RCS_STATUS::EXEC;
     else st = (int)stat->status;
     if (st == c_rep_state || st < 0) return;
@@ -703,6 +742,7 @@ int taskNatsInit(const char *inifile, int joints, double task_cycle_time, int ha
     // command queue: [TASK] MDI_QUEUED_COMMANDS (cmd_queue); 0 = nothing waits behind the one in hand
     // but the hand-over slot itself, so one slot at least
     cring.slot.assign(cmd_queue > 0 ? (size_t)cmd_queue : 1, nullptr);
+    iring.slot.assign(cring.slot.size(), nullptr);
 
     if (halnats::start(c, hal_comp_id, &owner)) return -1;
     enabled = true;
@@ -710,12 +750,15 @@ int taskNatsInit(const char *inifile, int joints, double task_cycle_time, int ha
     return 0;
 }
 
-// Task main loop, in a cycle in which NML brought no new command: the next NATS message to plan.
-RCS_CMD_MSG *taskNatsCommand(void)
+// Task main loop, every cycle: the next NATS message to plan (emcCommand = it), or nullptr.
+// *immediate: it is an immediate command - the caller hands emcTaskPlan's result to taskNatsPlanned.
+RCS_CMD_MSG *taskNatsCommand(bool *immediate)
 {
+    *immediate = false;
     if (!c_enabled) return nullptr;
     if (c_cur && c_next < c_cur->msgs.size() && c_rep_state == (int)RCS_STATUS::ERROR)
         c_next = c_cur->msgs.size();             // program/open: CLOSE failed - OPEN is not sent
+    bool c_final = c_rep_state == (int)RCS_STATUS::DONE || c_rep_state == (int)RCS_STATUS::ERROR;
     if (NCmd *p = pring.front()) {               // E-STOP / abort: ahead of everything
         pring.drop_front();
         std::unique_ptr<NCmd> n(p);
@@ -724,29 +767,43 @@ RCS_CMD_MSG *taskNatsCommand(void)
             return nullptr;
         }
         std::string why = "aborted by " + n->verb + " (cmd/serial " + std::to_string(n->serial) + ")";
-        if (c_cur && c_cur->refused.empty() && c_rep_state != (int)RCS_STATUS::DONE && c_rep_state != (int)RCS_STATUS::ERROR)
+        if (c_cur && c_cur->refused.empty() && !c_final)
             push_event(EV_CMD, c_cur->serial, (int)RCS_STATUS::ERROR, why.c_str());
-        while (NCmd *q = cring.front()) {        // queued before it (lower serial): aborted, never run after it
-            if (q->serial >= n->serial) break;
-            cring.drop_front();
-            push_event(EV_CMD, q->serial, (int)RCS_STATUS::ERROR, q->refused.empty() ? why.c_str() : q->refused.c_str());
-            delete q;
-        }
+        for (CmdRing *r : {&cring, &iring})      // queued before it (lower serial): aborted, never run after it
+            while (NCmd *q = r->front()) {
+                if (q->serial >= n->serial) break;
+                r->drop_front();
+                push_event(EV_CMD, q->serial, (int)RCS_STATUS::ERROR, q->refused.empty() ? why.c_str() : q->refused.c_str());
+                delete q;
+            }
         c_cur = std::move(n);
-        c_next = 0; c_rep_state = -1; c_err.clear();
+        c_next = 0; c_rep_state = -1; c_err.clear(); c_sup = false;
     } else if (!c_cur || c_next >= c_cur->msgs.size()) {
-        // one at a time, in cmd/serial order: the next is taken only after the final answer of the one in hand
-        if (c_cur && c_rep_state != (int)RCS_STATUS::DONE && c_rep_state != (int)RCS_STATUS::ERROR) return nullptr;
-        NCmd *q = cring.front();
-        if (!q) return nullptr;
-        cring.drop_front();
-        std::unique_ptr<NCmd> n(q);
-        if (!n->refused.empty()) {               // answered here; c_cur (maybe still emcCommand) stays alive
+        // one at a time, in cmd/serial order: the next is taken only after the final answer of the one
+        // in hand; an immediate command is taken at once (while one is in hand it overtakes the queue)
+        bool busy = c_cur && !c_final;
+        NCmd *q = cring.front(), *i = iring.front();
+        bool take_imm = i && (busy || !q || i->serial < q->serial);
+        if (!take_imm && (busy || !q)) return nullptr;
+        CmdRing &r = take_imm ? iring : cring;
+        r.drop_front();
+        std::unique_ptr<NCmd> n(take_imm ? i : q);
+        if (!n->refused.empty()) {               // answered here; c_cur / c_imm (maybe still emcCommand) stay alive
             push_event(EV_CMD, n->serial, (int)RCS_STATUS::ERROR, n->refused.c_str());
             return nullptr;
         }
+        if (take_imm) {                          // c_cur stays in hand; its answer now from the task's status
+            if (busy) c_sup = true;
+            c_imm = std::move(n);                // the old c_imm is replaced as emcCommand by the caller now
+            c_imm_open = true; c_imm_err.clear();
+            if (c_internal <= INT_MIN + 1) c_internal = 0;
+            RCS_CMD_MSG *m = c_imm->msgs[0].get();
+            m->serial_number = --c_internal;
+            *immediate = true;
+            return m;
+        }
         c_cur = std::move(n);                    // the old message is replaced as emcCommand by the caller now
-        c_next = 0; c_rep_state = -1; c_err.clear();
+        c_next = 0; c_rep_state = -1; c_err.clear(); c_sup = false;
     }
     RCS_CMD_MSG *m = c_cur->msgs[c_next++].get();
     if (c_internal <= INT_MIN + 1) c_internal = 0;
@@ -754,15 +811,30 @@ RCS_CMD_MSG *taskNatsCommand(void)
     return m;
 }
 
+// Task main loop, right after emcTaskPlan planned an immediate command: its answer (0 = DONE).
+// Its result stays out of the task's taskPlanError - that status is the command in hand's.
+void taskNatsPlanned(int plan_rc)
+{
+    if (!c_imm || !c_imm_open) return;
+    c_imm_open = false;
+    if (plan_rc == 0) push_event(EV_CMD, c_imm->serial, (int)RCS_STATUS::DONE, "");
+    else push_event(EV_CMD, c_imm->serial, (int)RCS_STATUS::ERROR,
+                    c_imm_err.empty() ? "refused by the task's plan" : c_imm_err.c_str());
+}
+
 // emcOperatorError / Text / Display (kind 0 / 1 / 2) of the task process, next to the NML error channel
 void taskNatsMessage(int kind, const char *text)
 {
     if (!c_enabled || kind < 0 || kind > 2) return;
     push_event((uint8_t)(EV_ERROR + kind), 0, 0, text);
-    if (kind == 0 && c_cur && c_rep_state != (int)RCS_STATUS::DONE && c_rep_state != (int)RCS_STATUS::ERROR
-        && c_err.size() < LINELEN) {          // the text of a failing NATS command's answer
-        if (!c_err.empty()) c_err += "; ";
-        c_err += text;
+    if (kind != 0) return;
+    // the text of a failing NATS command's answer: the immediate one being planned, else the one in hand
+    std::string *err = c_imm_open ? &c_imm_err
+                     : (c_cur && c_rep_state != (int)RCS_STATUS::DONE && c_rep_state != (int)RCS_STATUS::ERROR) ? &c_err
+                     : nullptr;
+    if (err && err->size() < LINELEN) {
+        if (!err->empty()) *err += "; ";
+        *err += text;
     }
 }
 

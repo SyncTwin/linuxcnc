@@ -51,7 +51,11 @@ void taskNatsShutdown(void);
 // Task main loop, every cycle: the next message to plan
 // (emcCommand = it), one per cycle, or nullptr. The answer goes out as an event (task cmd/serial,
 // cmd/state RCS_DONE/EXEC/ERROR, cmd/error) from taskNatsCycle - no client polling.
-RCS_CMD_MSG *taskNatsCommand(void);
+// *immediate: an immediate command (planned beside the one in hand, answering for itself) - the
+// caller keeps the task's error flags of the command in hand and hands emcTaskPlan's result to
+// taskNatsPlanned the same cycle.
+RCS_CMD_MSG *taskNatsCommand(bool *immediate);
+void taskNatsPlanned(int plan_rc);
 // emcOperatorError / emcOperatorText / emcOperatorDisplay (kind 0 / 1 / 2) -> device task
 // operator/error|text|display (String) - the only error channel.
 void taskNatsMessage(int kind, const char *text);
