@@ -525,7 +525,8 @@ AS_IF(
         NATS_MISSING=
         AC_MSG_CHECKING([for libnats])
         if pkg-config libnats >/dev/null 2>&1; then
-            AC_MSG_RESULT(yes - version `pkg-config libnats --modversion`)
+            LIBNATS_VER=`pkg-config libnats --modversion`
+            AC_MSG_RESULT(yes - version [$LIBNATS_VER])
             LIBNATS_CFLAGS=`pkg-config libnats --cflags`
             LIBNATS_LIBS=`pkg-config libnats --libs`
         else

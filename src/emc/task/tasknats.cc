@@ -28,6 +28,8 @@
 #include <inifile.hh>
 #include "libnml/rcs/rcs_print.hh"
 
+using linuxcnc::IniFile;
+
 #ifndef HAVE_LIBNATS
 
 int taskNatsInit(const char *inifile, int, double)
