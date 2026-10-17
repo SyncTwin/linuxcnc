@@ -296,16 +296,33 @@ void build_defs(int joints, int spindles)
 // harmless); inside the task the message carries a NEGATIVE serial of its own, so it can never
 // equal an NML serial (NML write ids are positive) and the planner's "new command" test
 // (serial != echo) stays exact across the two sources.
+// Priority lane (as Abort above all in PLCopen / ISA-88): state ESTOP and abort go to a ring of
+// their own that the task takes first - ahead of the queue and of the rest of the command in hand.
+// What they overtake is aborted, not left hanging: the command in hand and the commands queued
+// before them (lower cmd/serial) are answered ERROR "aborted by ...". A full ring refuses the
+// command with an answer ERROR "command queue full" - never silently, and a resend of the same
+// cmd/serial is accepted (it was not taken).
 
 struct NCmd {
     int64_t serial = 0;                          // the sender's cmd/serial
+    bool prio = false;                           // state ESTOP | abort: the priority lane
+    std::string verb;                            // the verb, for the answers of what it aborts
     std::vector<std::unique_ptr<RCS_CMD_MSG>> msgs;  // program/open = CLOSE + OPEN
     std::string refused;                         // non-empty: answered RCS_ERROR, nothing planned
 };
 
-const size_t CMD_RING = 64;                      // ПРЕДПОЛОЖЕНИЕ, не замер: 64 commands queued ahead of the task
-NCmd *cring[CMD_RING];
-std::atomic<size_t> c_head{0}, c_tail{0};
+// SPSC under cmx: producers (NATS delivery threads) serialized by cmx, the task thread pops lock-free
+struct CmdRing {
+    std::vector<NCmd *> slot;
+    std::atomic<size_t> head{0}, tail{0};
+    explicit CmdRing(size_t n) : slot(n) {}
+    bool full() const { return head.load(std::memory_order_relaxed) - tail.load(std::memory_order_acquire) >= slot.size(); }
+    void push(NCmd *c) { size_t h = head.load(std::memory_order_relaxed); slot[h % slot.size()] = c; head.store(h + 1, std::memory_order_release); }
+    NCmd *front() const { size_t t = tail.load(std::memory_order_relaxed); return t == head.load(std::memory_order_acquire) ? nullptr : slot[t % slot.size()]; }
+    void drop_front() { tail.store(tail.load(std::memory_order_relaxed) + 1, std::memory_order_release); }
+};
+CmdRing cring(64);                               // ПРЕДПОЛОЖЕНИЕ, не замер: 64 commands queued ahead of the task
+CmdRing pring(8);                                // ПРЕДПОЛОЖЕНИЕ, не замер: 8 E-STOP / abort between two task cycles
 std::mutex cmx;                                  // producers only (NATS delivery threads)
 int64_t c_last_serial = INT64_MIN;               // under cmx: the last accepted cmd/serial
 bool c_enabled = false;
@@ -395,6 +412,7 @@ std::string parse_cmd(size_t dev, const SparkplugB__Payload *pl, NCmd &c, bool &
     if (!has_serial) return "no cmd/serial";
     if (!verb) return "no command";
     std::string v = verb->name;
+    c.verb = v;
     int64_t i = 0;
     const char *str = verb->value_case == HN_V(STRING_VALUE) ? verb->string_value : nullptr;
     auto put = [&](RCS_CMD_MSG *m) { c.msgs.emplace_back(m); };
@@ -403,6 +421,7 @@ std::string parse_cmd(size_t dev, const SparkplugB__Payload *pl, NCmd &c, bool &
             if (!metric_int(verb, i) || i < (int)EMC_TASK_STATE::ESTOP || i > (int)EMC_TASK_STATE::ON)
                 return "state: 1 ESTOP | 2 ESTOP_RESET | 3 OFF | 4 ON";
             auto *m = new EMC_TASK_SET_STATE; m->state = (EMC_TASK_STATE)i; put(m);
+            c.prio = i == (int)EMC_TASK_STATE::ESTOP;
         } else if (v == "mode") {
             if (!metric_int(verb, i) || i < (int)EMC_TASK_MODE::MANUAL || i > (int)EMC_TASK_MODE::MDI)
                 return "mode: 1 MANUAL | 2 AUTO | 3 MDI";
@@ -423,7 +442,7 @@ std::string parse_cmd(size_t dev, const SparkplugB__Payload *pl, NCmd &c, bool &
         } else if (v == "program/pause") { if (!metric_true(verb)) return v + ": Boolean true"; put(new EMC_TASK_PLAN_PAUSE); }
         else if (v == "program/resume") { if (!metric_true(verb)) return v + ": Boolean true"; put(new EMC_TASK_PLAN_RESUME); }
         else if (v == "program/step") { if (!metric_true(verb)) return v + ": Boolean true"; put(new EMC_TASK_PLAN_STEP); }
-        else if (v == "abort") { if (!metric_true(verb)) return v + ": Boolean true"; put(new EMC_TASK_ABORT); }
+        else if (v == "abort") { if (!metric_true(verb)) return v + ": Boolean true"; put(new EMC_TASK_ABORT); c.prio = true; }
         else return "unknown command of device task: " + v;
         return "";
     }
@@ -462,15 +481,17 @@ void on_command(size_t dev, const SparkplugB__Payload *pl)
         c->refused = bad;
         rcs_print_error("task: NATS DCMD %s refused: %s\n", dev_names[dev].c_str(), bad.c_str());
         if (!has_serial) return;                 // nothing to answer to
-    } else c_last_serial = c->serial;
-    size_t h = c_head.load(std::memory_order_relaxed);
-    if (h - c_tail.load(std::memory_order_acquire) >= CMD_RING) {
-        rcs_print_error("task: NATS DCMD %s cmd/serial %lld dropped: %zu commands queued, the task is not taking them\n",
-                        dev_names[dev].c_str(), (long long)c->serial, CMD_RING);
+    }
+    CmdRing &r = c->prio ? pring : cring;
+    if (r.full()) {                              // refused with an answer; c_last_serial untouched: a resend is accepted
+        std::string why = std::string(c->prio ? "priority " : "") + "command queue full: "
+                        + std::to_string(r.slot.size()) + " commands not yet taken by the task";
+        rcs_print_error("task: NATS DCMD %s cmd/serial %lld refused: %s\n", dev_names[dev].c_str(), (long long)c->serial, why.c_str());
+        push_event(EV_CMD, c->serial, (int)RCS_STATUS::ERROR, why.c_str());
         return;
     }
-    cring[h % CMD_RING] = c.release();
-    c_head.store(h + 1, std::memory_order_release);
+    if (c->refused.empty()) c_last_serial = c->serial;
+    r.push(c.release());
 }
 
 // task thread, end of cycle: the answer of the command in hand, on change only
@@ -661,11 +682,29 @@ RCS_CMD_MSG *taskNatsCommand(void)
     if (!c_enabled) return nullptr;
     if (c_cur && c_next < c_cur->msgs.size() && c_rep_state == (int)RCS_STATUS::ERROR)
         c_next = c_cur->msgs.size();             // program/open: CLOSE failed - OPEN is not sent
-    if (!c_cur || c_next >= c_cur->msgs.size()) {
-        size_t t = c_tail.load(std::memory_order_relaxed);
-        if (t == c_head.load(std::memory_order_acquire)) return nullptr;
-        std::unique_ptr<NCmd> n(cring[t % CMD_RING]);
-        c_tail.store(t + 1, std::memory_order_release);
+    if (NCmd *p = pring.front()) {               // E-STOP / abort: ahead of everything
+        pring.drop_front();
+        std::unique_ptr<NCmd> n(p);
+        if (!n->refused.empty()) {
+            push_event(EV_CMD, n->serial, (int)RCS_STATUS::ERROR, n->refused.c_str());
+            return nullptr;
+        }
+        std::string why = "aborted by " + n->verb + " (cmd/serial " + std::to_string(n->serial) + ")";
+        if (c_cur && c_cur->refused.empty() && c_rep_state != (int)RCS_STATUS::DONE && c_rep_state != (int)RCS_STATUS::ERROR)
+            push_event(EV_CMD, c_cur->serial, (int)RCS_STATUS::ERROR, why.c_str());
+        while (NCmd *q = cring.front()) {        // queued before it (lower serial): aborted, never run after it
+            if (q->serial >= n->serial) break;
+            cring.drop_front();
+            push_event(EV_CMD, q->serial, (int)RCS_STATUS::ERROR, q->refused.empty() ? why.c_str() : q->refused.c_str());
+            delete q;
+        }
+        c_cur = std::move(n);
+        c_next = 0; c_rep_state = -1; c_err.clear();
+    } else if (!c_cur || c_next >= c_cur->msgs.size()) {
+        NCmd *q = cring.front();
+        if (!q) return nullptr;
+        cring.drop_front();
+        std::unique_ptr<NCmd> n(q);
         if (!n->refused.empty()) {               // answered here; c_cur (maybe still emcCommand) stays alive
             push_event(EV_CMD, n->serial, (int)RCS_STATUS::ERROR, n->refused.c_str());
             return nullptr;

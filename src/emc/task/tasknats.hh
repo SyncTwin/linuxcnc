@@ -21,6 +21,7 @@
 *   cmd/serial (Int64, growing) + one verb: task  state | mode | mdi | program/open |
 *   program/run | program/pause | program/resume | program/step | abort; motion  home | unhome |
 *   teleop | jog/stop | jog/continuous | jog/increment (+ jog/joint, jog/velocity, jog/distance).
+*   state ESTOP and abort take a priority lane ahead of the queue; a full queue answers ERROR.
 *
 * License: GPL Version 2
 * Copyright (c) 2026 SyncTwin Technologies
