@@ -10,6 +10,9 @@
 *
 *   Config: INI [NATS] URL, GROUP, NODE (PUBLISH_PERIOD optional, default
 *   [TASK] CYCLE_TIME). No URL - publishing off, said once in the log.
+*   [NATS] PINS = <file> (optional, relative to the INI's folder): HAL pins /
+*   signals (device hal) and a sampler FIFO (device scope) in the hal2spb.conf
+*   line format - see tasknats.cc. Read in the publisher's threads only.
 *
 * License: GPL Version 2
 * Copyright (c) 2026 SyncTwin Technologies
@@ -20,7 +23,8 @@
 class EMC_STAT;
 
 // 0 = publishing on or deliberately off; -1 = [NATS] present but refused (said in the log)
-int taskNatsInit(const char *inifile, int joints, double task_cycle_time);
+// hal_comp_id: the task's HAL component (iocontrol) - the sampler FIFO is attached with it
+int taskNatsInit(const char *inifile, int joints, double task_cycle_time, int hal_comp_id);
 void taskNatsCycle(const EMC_STAT *stat);
 void taskNatsShutdown(void);
 
