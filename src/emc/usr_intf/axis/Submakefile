@@ -1,4 +1,8 @@
 
+# The Python `linuxcnc` module keeps only what is not NML: linuxcnc.ini, constants, tool, backplot
+# helpers; stat / command / error_channel / positionlogger are gone - the task's bus is NATS
+# (emc/task/tasknats.cc). The scripts that only drove NML (linuxcnctop, mdi, lintini, debuglevel,
+# tracking-test) are gone with them.
 EMCMODULESRCS := emc/usr_intf/axis/extensions/emcmodule.cc
 TOGLMODULESRCS := emc/usr_intf/axis/extensions/_toglmodule.c
 TKDARMODULESRCS := emc/usr_intf/axis/extensions/tkdarmodule.c
@@ -32,10 +36,10 @@ ifeq ($(BUILD_GUI),yes)
 PYTARGETS += $(TOGLMODULE) $(TKDARMODULE)
 endif
 
-ALL_PYSCRIPTS := axis.py axis-remote.py linuxcnctop.py hal_manualtoolchange.py \
-	mdi.py image-to-gcode.py lintini.py debuglevel.py teach-in.py tracking-test.py
+ALL_PYSCRIPTS := axis.py axis-remote.py hal_manualtoolchange.py \
+	image-to-gcode.py teach-in.py
 
-PYSCRIPTS := linuxcnctop.py mdi.py lintini.py debuglevel.py tracking-test.py
+PYSCRIPTS :=
 ifeq ($(BUILD_GUI),yes)
 PYSCRIPTS += axis.py axis-remote.py hal_manualtoolchange.py image-to-gcode.py teach-in.py
 endif
