@@ -29,6 +29,26 @@
 *            attach dropped, then batches of scope_batch rows as one DDATA of
 *            DoubleArray/FloatArray columns (packed LE) stamped with the first row's time; a
 *            column constant at its last sent value is left out (report by exception).
+*     tag <key> bit|s32|u32|s64|float dir=in|out src=<pin> | sig=<signal> writer=<equipment> stand=<stand>
+*         alive=<liveness key> [strobe=1] [safe=<v>]
+*            A cell tag in KV bucket CELL - node to node, no Sparkplug (the pipe of the removed agent
+*            nats-bridge, rule for rule). Bodies: cnc_servo/tag_envelope.py. dir=in (the node writes): HAL
+*            read every publisher period, put $KV.CELL.<key> by exception {value, hal_type, writer, ts, seq,
+*            q}, ts = the read moment, seq = boot time in us +1 per put; the liveness key of `stand` gets
+*            {alive, writer: stand, ts, seq} every tag_ttl_s/3, all values again (BIRTH) before it after every
+*            (re)connect, alive false at a clean exit. dir=out (the node reads): watch kv.CELL.<key> (the
+*            stream's republish) and the writer stand's liveness key, current values by direct get
+*            KV_CELL {"last_by_subj"} after every (re)connect; a value reaches HAL (halcmd's rules, as
+*            pin dir=out) only from the bound `writer`, of its hal_type, newer seq, while the writer stand
+*            is alive (liveness younger than tag_ttl_s) - a value got while it is dead is held and applied
+*            on its return. Writer stand dead, its alive false or the NATS link lost: every dir=out end of
+*            it gets its rest value once (safe=<v>, else the HAL default 0); its return re-reads the
+*            current values. strobe=1: an event of its data (RemoteInterface CmdValue, touch-probe
+*            latch-seq) - read first, put last, applied last. One stand per node for dir=in.
+*     tag_ttl_s <s>         writer liveness TTL (tag_envelope.ALIVE_TTL_S; needed with tags)
+*     tag_ok sig=<signal> | src=<pin>
+*            bit, the quality of every read tag (the bridge's link-ok, the node's Interlock/Starved):
+*            1 = link up, every writer stand alive, no refused read tag; 0 said with its reason.
 *   hal2spb's runtime keys (url user pass node spb_group spb_birth_s format scope_subject)
 *   are ignored here: the environment / INI [NATS] give them.
 *
@@ -38,10 +58,13 @@
 #include "halnats.hh"
 #include "halnats_err.hh"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <thread>
 #include <errno.h>
 #include <stdarg.h>
@@ -213,17 +236,17 @@ bool moved(const HPin &p, Val v)
     return p.q > 0 ? d + p.q * 1e-6 >= p.db : d > p.db;
 }
 // one read through the HAL query API: under the HAL mutex, the link resolved at this call
-int hal_read(const HPin &p, Val &v)
+int hal_get_named(bool sig, const std::string &src, hal_type_t type, Val &v)
 {
     hal_query_t q;
     memset(&q, 0, sizeof q);
-    q.name = p.src.c_str();
+    q.name = src.c_str();
     hal_query_value_u u;
     int rc;
-    if (p.sig) { q.qtype = HAL_QTYPE_SIGNAL; q.sig.type = p.type; rc = hal_get_s(&q, nullptr, nullptr); u = q.sig.value; }
-    else { q.qtype = HAL_QTYPE_PIN; q.pp.type = p.type; rc = hal_get_p(&q, nullptr, nullptr); u = q.pp.value; }
+    if (sig) { q.qtype = HAL_QTYPE_SIGNAL; q.sig.type = type; rc = hal_get_s(&q, nullptr, nullptr); u = q.sig.value; }
+    else { q.qtype = HAL_QTYPE_PIN; q.pp.type = type; rc = hal_get_p(&q, nullptr, nullptr); u = q.pp.value; }
     if (rc) return rc;
-    switch (p.type) {
+    switch (type) {
     case HAL_BOOL: v.i = u.b ? 1 : 0; break;
     case HAL_SINT: v.i = u.s; break;
     case HAL_UINT: v.i = (int64_t)u.u; break;
@@ -231,6 +254,7 @@ int hal_read(const HPin &p, Val &v)
     }
     return 0;
 }
+int hal_read(const HPin &p, Val &v) { return hal_get_named(p.sig, p.src, p.type, v); }
 const char *hal_err(int rc)
 {
     return rc == -ENOENT ? "not in HAL (yet)" : rc == -EEXIST ? "HAL type differs from the conf"
@@ -355,15 +379,18 @@ void on_snapshot(natsConnection *, natsSubscription *, natsMsg *msg, void *)
 
 // ---- commands ----
 
-// write a dir=out row with halcmd's rules (sig=: `sets` on a signal without a writer; src=: `setp` on an unlinked IN pin)
-void hal_write(const HPin &p, hal_query_value_u v, const char *why)
+// write with halcmd's rules (sig=: `sets` on a signal without a writer; src=: `setp` on an unlinked IN pin)
+int hal_set_named(bool sig, const std::string &src, hal_type_t type, hal_query_value_u v)
 {
     hal_query_t q;
     memset(&q, 0, sizeof q);
-    q.name = p.src.c_str();
-    int rc;
-    if (p.sig) { q.qtype = HAL_QTYPE_SIGNAL; q.sig.type = p.type; q.sig.value = v; rc = hal_set_s(&q, nullptr, nullptr); }
-    else { q.qtype = HAL_QTYPE_PIN; q.pp.type = p.type; q.pp.value = v; rc = hal_set_p(&q, nullptr, nullptr); }
+    q.name = src.c_str();
+    if (sig) { q.qtype = HAL_QTYPE_SIGNAL; q.sig.type = type; q.sig.value = v; return hal_set_s(&q, nullptr, nullptr); }
+    q.qtype = HAL_QTYPE_PIN; q.pp.type = type; q.pp.value = v; return hal_set_p(&q, nullptr, nullptr);
+}
+void hal_write(const HPin &p, hal_query_value_u v, const char *why)
+{
+    int rc = hal_set_named(p.sig, p.src, p.type, v);
     if (rc) say(true, "%s: NATS %s hal %s -> %s: %s\n", tag(), why, p.metric.c_str(), p.src.c_str(), hal_err(rc));
 }
 
@@ -469,6 +496,573 @@ void host_guard()
     }
 }
 
+// ---- cell tags: KV bucket CELL (the box NATS; a line maps it to the line domain) ----
+//
+// The pipe of the removed nats-bridge (agent drivers/nats_bridge.py, tag keep/vm-agent-wave2-2026-10-18), rule
+// for rule: put $KV.CELL.<key> (core PUB, stored by stream KV_CELL), current value by direct get
+// $JS.API.DIRECT.GET.KV_CELL {"last_by_subj"}, watch of the stream's republish kv.CELL.<key>. Bodies - the one
+// home cnc_servo/tag_envelope.py: tag envelope {value, hal_type, writer, ts, seq, q} and liveness
+// {alive, writer, ts, seq}. Every tag state lives in the publisher thread; the watch callback only queues.
+
+enum TagType { T_BIT, T_S32, T_U32, T_S64, T_FLOAT };
+const char *const tag_type_names[] = {"bit", "s32", "u32", "s64", "float"};
+const uint64_t U32_MAX_V = 0xffffffffull;
+
+struct TagEnd {
+    std::string key;                             // KV key without $KV.CELL.
+    TagType tt;
+    hal_type_t type;                             // HAL type the query API reads/writes
+    bool out;                                    // dir=out: KV -> HAL (a reader end); dir=in: HAL -> KV (writer)
+    bool sig;
+    std::string src;
+    std::string writer;                          // equipment id of the writing end (envelope `writer`)
+    std::string stand;                           // stand of the writer (liveness `writer`)
+    bool strobe;                                 // event of its data (RemoteInterface CmdValue, latch-seq)
+    hal_query_value_u rest;                      // dir=out: value while its writer is not alive (safe=, else 0)
+    // writer end
+    bool put_any = false, said = false;
+    Val last_put{};
+    // reader end
+    bool has_seq = false;
+    int64_t last_seq = 0;
+    bool held = false;
+    std::string held_data;
+};
+std::vector<TagEnd> tends;                       // readers and writers each data before strobes (stable)
+std::map<std::string, std::string> tag_alive;    // writer stand -> its liveness key
+std::map<std::string, std::string> tag_alive_of; // liveness key -> stand (reader side)
+std::string tag_own_stand;                       // the stand of this node's dir=in tags
+double tag_ttl_s = 0;                            // tag_ttl_s of the file (tag_envelope.ALIVE_TTL_S)
+bool tag_ok_sig = false;
+std::string tag_ok_src;                          // tag_ok sig=|src=: bit, the quality of every read tag
+int tag_ok_last = -1;
+int tag_ok_err = 0;                              // the last refusal of the tag_ok write, said once
+std::vector<natsSubscription *> tag_subs;
+std::mutex tq_mx;                                // the watch queue (nats thread -> publisher)
+std::deque<std::pair<std::string, std::string>> tq;
+std::atomic<bool> tag_start{false}, tag_lost{false};
+bool tlink = false;                              // connected and the snapshot taken (publisher thread)
+double tag_retry = 0;
+std::map<std::string, double> alive_at;          // stand -> CLOCK_MONOTONIC of its last alive (now - age)
+std::map<std::string, double> rested;            // stand -> since when its reader ends rest
+std::set<std::string> revived;
+std::map<std::string, std::string> rejected;     // key -> reason
+std::string tag_reason;
+double alive_sent = -1e18;
+bool alive_born = false;                         // the first alive of this session sent
+int64_t tag_seq = 0;                             // tag_envelope.Sequence: boot time in us, +1 per put
+
+bool tag_has_readers() { for (const TagEnd &t : tends) if (t.out) return true; return false; }
+int64_t tag_next_seq() { return ++tag_seq; }
+double now_unix()
+{
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME, &t);
+    return t.tv_sec + t.tv_nsec * 1e-9;
+}
+
+// -- flat JSON object (the two bodies are flat; a nested value is skipped, as Python reads it and ignores it)
+struct JVal { enum K { STR, NUM, BOOL, NUL, OTHER } k = OTHER; std::string s; double d = 0; bool b = false; bool integral = false; };
+
+void j_ws(const std::string &t, size_t &i) { while (i < t.size() && (t[i] == ' ' || t[i] == '\t' || t[i] == '\n' || t[i] == '\r')) i++; }
+bool j_str(const std::string &t, size_t &i, std::string &out)
+{
+    if (i >= t.size() || t[i] != '"') return false;
+    for (i++; i < t.size(); i++) {
+        char c = t[i];
+        if (c == '"') { i++; return true; }
+        if (c != '\\') { out += c; continue; }
+        if (++i >= t.size()) return false;
+        switch (t[i]) {
+        case '"': out += '"'; break;
+        case '\\': out += '\\'; break;
+        case '/': out += '/'; break;
+        case 'b': out += '\b'; break;
+        case 'f': out += '\f'; break;
+        case 'n': out += '\n'; break;
+        case 'r': out += '\r'; break;
+        case 't': out += '\t'; break;
+        case 'u': {
+            if (i + 4 >= t.size()) return false;
+            unsigned cp = (unsigned)strtoul(t.substr(i + 1, 4).c_str(), nullptr, 16);
+            i += 4;
+            if (cp < 0x80) out += (char)cp;
+            else if (cp < 0x800) { out += (char)(0xc0 | (cp >> 6)); out += (char)(0x80 | (cp & 0x3f)); }
+            else { out += (char)(0xe0 | (cp >> 12)); out += (char)(0x80 | ((cp >> 6) & 0x3f)); out += (char)(0x80 | (cp & 0x3f)); }
+            break;
+        }
+        default: return false;
+        }
+    }
+    return false;
+}
+bool j_skip(const std::string &t, size_t &i)          // a nested object/array
+{
+    int depth = 0;
+    for (; i < t.size(); i++) {
+        char c = t[i];
+        if (c == '"') { std::string dummy; if (!j_str(t, i, dummy)) return false; i--; continue; }
+        if (c == '{' || c == '[') depth++;
+        else if (c == '}' || c == ']') { if (--depth == 0) { i++; return true; } }
+    }
+    return false;
+}
+bool json_flat(const std::string &t, std::map<std::string, JVal> &o)
+{
+    size_t i = 0;
+    j_ws(t, i);
+    if (i >= t.size() || t[i++] != '{') return false;
+    j_ws(t, i);
+    if (i < t.size() && t[i] == '}') return true;
+    for (;;) {
+        std::string k;
+        j_ws(t, i);
+        if (!j_str(t, i, k)) return false;
+        j_ws(t, i);
+        if (i >= t.size() || t[i++] != ':') return false;
+        j_ws(t, i);
+        if (i >= t.size()) return false;
+        JVal v;
+        char c = t[i];
+        if (c == '"') { v.k = JVal::STR; if (!j_str(t, i, v.s)) return false; }
+        else if (c == '{' || c == '[') { v.k = JVal::OTHER; if (!j_skip(t, i)) return false; }
+        else if (!t.compare(i, 4, "true")) { v.k = JVal::BOOL; v.b = true; i += 4; }
+        else if (!t.compare(i, 5, "false")) { v.k = JVal::BOOL; i += 5; }
+        else if (!t.compare(i, 4, "null")) { v.k = JVal::NUL; i += 4; }
+        else if (!t.compare(i, 3, "NaN")) { v.k = JVal::NUM; v.d = NAN; i += 3; }               // Python json.dumps
+        else if (!t.compare(i, 8, "Infinity")) { v.k = JVal::NUM; v.d = INFINITY; i += 8; }
+        else if (!t.compare(i, 9, "-Infinity")) { v.k = JVal::NUM; v.d = -INFINITY; i += 9; }
+        else {
+            size_t b = i;
+            while (i < t.size() && (isdigit((unsigned char)t[i]) || t[i] == '-' || t[i] == '+' || t[i] == '.' || t[i] == 'e' || t[i] == 'E')) i++;
+            std::string n = t.substr(b, i - b);
+            if (n.empty()) return false;
+            v.k = JVal::NUM; v.s = n;
+            v.integral = n.find_first_of(".eE") == std::string::npos;   // Python: type(value) is int
+            char *e = nullptr;
+            v.d = strtod(n.c_str(), &e);
+            if (!e || *e) return false;
+        }
+        o[k] = v;
+        j_ws(t, i);
+        if (i >= t.size()) return false;
+        if (t[i] == ',') { i++; continue; }
+        if (t[i] == '}') return true;
+        return false;
+    }
+}
+bool j_int(const JVal &v, int64_t &out)               // an exact JSON integer (or its decimal string)
+{
+    const std::string &s = v.s;
+    if (!((v.k == JVal::NUM && v.integral) || v.k == JVal::STR) || s.empty()) return false;
+    char *e = nullptr;
+    errno = 0;
+    long long n = strtoll(s.c_str(), &e, 10);
+    if (!e || *e || errno) return false;
+    out = n;
+    return true;
+}
+std::string j_esc(const std::string &s)
+{
+    std::string o;
+    for (char c : s) {
+        if (c == '"' || c == '\\') { o += '\\'; o += c; }
+        else if ((unsigned char)c < 0x20) { char b[8]; snprintf(b, sizeof b, "\\u%04x", c); o += b; }
+        else o += c;
+    }
+    return o;
+}
+std::string j_num(double d)                            // Python json.dumps of a float
+{
+    if (std::isnan(d)) return "NaN";
+    if (std::isinf(d)) return d > 0 ? "Infinity" : "-Infinity";
+    char b[40];
+    snprintf(b, sizeof b, "%.17g", d);
+    std::string s(b);
+    if (s.find_first_of(".eE") == std::string::npos) s += ".0";
+    return s;
+}
+
+// -- the envelope (tag_envelope.pack / unpack / value_of / pack_alive / is_alive)
+// nullptr = packed; else the refusal (u32 out of range - a wrap would hand the reader another number)
+const char *tag_pack(const TagEnd &t, Val v, double ts, int64_t seq, std::string &out)
+{
+    std::string val;
+    char b[32];
+    switch (t.tt) {
+    case T_BIT: val = v.i ? "true" : "false"; break;
+    case T_S32: snprintf(b, sizeof b, "%lld", (long long)v.i); val = b; break;
+    case T_U32:
+        if ((uint64_t)v.i > U32_MAX_V) return "value out of u32";
+        snprintf(b, sizeof b, "%llu", (unsigned long long)(uint64_t)v.i); val = b; break;
+    case T_S64: snprintf(b, sizeof b, "\"%lld\"", (long long)v.i); val = b; break;   // proto3 JSON int64 -> string
+    default: val = j_num(v.d); break;
+    }
+    char tail[96];
+    snprintf(tail, sizeof tail, ", \"ts\": %.6f, \"seq\": %lld, \"q\": \"good\"}", ts, (long long)seq);
+    out = "{\"value\": " + val + ", \"hal_type\": \"" + tag_type_names[t.tt] + "\", \"writer\": \"" + j_esc(t.writer) + "\"" + tail;
+    return nullptr;
+}
+std::string tag_pack_alive(const std::string &stand, bool alive, double ts, int64_t seq)
+{
+    char tail[80];
+    snprintf(tail, sizeof tail, ", \"ts\": %.6f, \"seq\": %lld}", ts, (long long)seq);
+    return std::string("{\"alive\": ") + (alive ? "true" : "false") + ", \"writer\": \"" + j_esc(stand) + "\"" + tail;
+}
+bool tag_is_alive(const std::string &data, const std::string &stand)
+{
+    std::map<std::string, JVal> o;
+    if (!json_flat(data, o)) return false;
+    auto a = o.find("alive"), w = o.find("writer");
+    return a != o.end() && a->second.k == JVal::BOOL && a->second.b
+        && w != o.end() && w->second.k == JVal::STR && w->second.s == stand;
+}
+// unpack + the writer check + value_of: nullptr = `v` and `seq` hold it; else the refusal
+const char *tag_unpack(const TagEnd &t, const std::string &data, hal_query_value_u &v, int64_t &seq, std::string &why)
+{
+    std::map<std::string, JVal> o;
+    if (!json_flat(data, o)) return "not an envelope in KV (not a JSON object)";
+    for (const char *k : {"value", "hal_type", "writer", "ts", "seq"})
+        if (!o.count(k)) { why = std::string("not an envelope in KV (no ") + k + ")"; return why.c_str(); }
+    const JVal &js = o["seq"], &jt = o["ts"];
+    if (!j_int(js, seq)) {
+        if (js.k == JVal::NUM && std::isfinite(js.d)) seq = (int64_t)js.d;   // Python int(float) truncates
+        else return "not an envelope in KV (seq is not a number)";
+    }
+    if (!(jt.k == JVal::NUM || (jt.k == JVal::STR && !jt.s.empty() && strtod(jt.s.c_str(), nullptr) == strtod(jt.s.c_str(), nullptr))))
+        return "not an envelope in KV (ts is not a number)";
+    const JVal &w = o["writer"];
+    if (w.k != JVal::STR || w.s != t.writer) {
+        why = "writer '" + (w.k == JVal::STR ? w.s : std::string("?")) + "' is not the bound writer '" + t.writer + "' - put refused";
+        return why.c_str();
+    }
+    const JVal &ht = o["hal_type"], &val = o["value"];
+    if (ht.k != JVal::STR || ht.s != tag_type_names[t.tt]) {
+        why = "writer sends '" + (ht.k == JVal::STR ? ht.s : std::string("?")) + "', the reader is " + tag_type_names[t.tt];
+        return why.c_str();
+    }
+    int64_t n = 0;
+    switch (t.tt) {
+    case T_BIT:
+        if (val.k != JVal::BOOL) return "value is not bit";
+        v.b = val.b; return nullptr;
+    case T_S32:
+        if (val.k != JVal::NUM || !j_int(val, n)) return "value is not s32";
+        v.s = n; return nullptr;
+    case T_U32:
+        if (val.k != JVal::NUM || !j_int(val, n) || n < 0 || (uint64_t)n > U32_MAX_V) return "value is not u32 (0..2^32-1)";
+        v.u = (uint64_t)n; return nullptr;
+    case T_S64:
+        if (!j_int(val, n)) return "value is not s64";
+        v.s = n; return nullptr;
+    default:
+        if (val.k != JVal::NUM) return "value is not float";
+        v.r = val.d; return nullptr;
+    }
+}
+
+// -- KV on the node's connection
+void kv_put(const std::string &key, const std::string &body)
+{
+    natsConnection_Publish(nc, ("$KV.CELL." + key).c_str(), body.data(), (int)body.size());
+}
+double rfc3339(const char *s)                          // Nats-Time-Stamp -> unix seconds; 0 = unknown
+{
+    struct tm tm;
+    memset(&tm, 0, sizeof tm);
+    int n = 0;
+    if (!s || sscanf(s, "%d-%d-%dT%d:%d:%d%n", &tm.tm_year, &tm.tm_mon, &tm.tm_mday, &tm.tm_hour, &tm.tm_min, &tm.tm_sec, &n) < 6)
+        return 0;
+    tm.tm_year -= 1900; tm.tm_mon -= 1;
+    double frac = 0;
+    if (s[n] == '.') frac = strtod(s + n, nullptr);
+    return (double)timegm(&tm) + frac;
+}
+// 1 = got, 0 = no value in the bucket, -1 = the request failed (said)
+int kv_get(const std::string &key, std::string &data, double &stored)
+{
+    std::string req = "{\"last_by_subj\":\"$KV.CELL." + key + "\"}";
+    natsMsg *r = nullptr;
+    // ПРЕДПОЛОЖЕНИЕ, не замер: 1 s per direct get - the bridge's nats_mini.direct_last default
+    natsStatus st = natsConnection_Request(&r, nc, "$JS.API.DIRECT.GET.KV_CELL", req.data(), (int)req.size(), 1000);
+    if (st != NATS_OK) {
+        say(true, "%s: NATS tags: direct get KV_CELL %s: %s\n", tag(), key.c_str(), natsStatus_GetText(st));
+        return -1;
+    }
+    const char *status = nullptr;
+    if (natsMsgHeader_Get(r, "Status", &status) == NATS_OK && status && *status) {
+        int code = atoi(status);
+        natsMsg_Destroy(r);
+        if (code == 404) return 0;
+        say(true, "%s: NATS tags: direct get KV_CELL %s: status %d\n", tag(), key.c_str(), code);
+        return -1;
+    }
+    data.assign(natsMsg_GetData(r) ? natsMsg_GetData(r) : "", natsMsg_GetDataLength(r));
+    const char *ts = nullptr;
+    stored = natsMsgHeader_Get(r, "Nats-Time-Stamp", &ts) == NATS_OK ? rfc3339(ts) : 0;
+    natsMsg_Destroy(r);
+    return 1;
+}
+void on_tag_msg(natsConnection *, natsSubscription *, natsMsg *msg, void *)
+{
+    const char *subj = natsMsg_GetSubject(msg);
+    std::string key = subj && !strncmp(subj, "kv.CELL.", 8) ? subj + 8 : "";
+    std::string data(natsMsg_GetData(msg) ? natsMsg_GetData(msg) : "", natsMsg_GetDataLength(msg));
+    natsMsg_Destroy(msg);
+    if (key.empty()) return;
+    std::lock_guard<std::mutex> g(tq_mx);
+    tq.emplace_back(key, data);
+}
+
+// -- reader: KV -> HAL
+bool stand_alive(const std::string &stand)
+{
+    auto a = alive_at.find(stand);
+    return a != alive_at.end() && now_mono() - a->second <= tag_ttl_s;
+}
+void tag_set(TagEnd &t, hal_query_value_u v, const char *why)
+{
+    int rc = hal_set_named(t.sig, t.src, t.type, v);
+    if (rc) say(true, "%s: NATS tag %s %s -> %s: %s\n", tag(), why, t.key.c_str(), t.src.c_str(), hal_err(rc));
+}
+void tag_reject(const TagEnd &t, const std::string &why)
+{
+    auto r = rejected.find(t.key);
+    if (r != rejected.end() && r->second == why) return;
+    rejected[t.key] = why;
+    say(true, "%s: NATS tag %s: %s\n", tag(), t.key.c_str(), why.c_str());
+}
+void tag_apply_one(TagEnd &t, const std::string &data)
+{
+    hal_query_value_u v;
+    memset(&v, 0, sizeof v);
+    int64_t seq = 0;
+    std::string why;
+    const char *bad = tag_unpack(t, data, v, seq, why);
+    if (bad) {
+        // the bridge checks seq before the type: an older value of a wrong type is refused here, not skipped
+        tag_reject(t, bad);
+        return;
+    }
+    if (t.has_seq && seq <= t.last_seq) return;  // not newer (P-5)
+    tag_set(t, v, "KV");
+    t.has_seq = true; t.last_seq = seq;
+    rejected.erase(t.key);
+}
+bool tag_newer(const std::string &data, const TagEnd &t)
+{
+    if (!t.held) return true;
+    std::map<std::string, JVal> a, b;
+    int64_t sa = 0, sb = 0;
+    if (!json_flat(data, a) || !json_flat(t.held_data, b) || !j_int(a["seq"], sa) || !j_int(b["seq"], sb)) return true;
+    return sa > sb;
+}
+void tag_apply(const std::string &key, const std::string &data, double age)
+{
+    auto st = tag_alive_of.find(key);
+    if (st != tag_alive_of.end()) {
+        const std::string &stand = st->second;
+        if (tag_is_alive(data, stand)) {
+            alive_at[stand] = now_mono() - age;
+            if (stand_alive(stand)) {
+                auto r = rested.find(stand);
+                if (r != rested.end()) {            // first alive after a death: GOOD again (Sparkplug B)
+                    say(false, "%s: NATS tags: writer stand %s alive again (key %s) after %.1f s at rest\n",
+                        tag(), stand.c_str(), key.c_str(), now_mono() - r->second);
+                    rested.erase(r);
+                    revived.insert(stand);
+                }
+                for (TagEnd &t : tends)             // data before strobe (load order), not arrival order
+                    if (t.out && t.stand == stand && t.held) { t.held = false; tag_apply_one(t, t.held_data); }
+            }
+        } else {
+            alive_at.erase(stand);                  // NDEATH: clean exit of the writer
+        }
+        return;
+    }
+    for (TagEnd &t : tends) {
+        if (!t.out || t.key != key) continue;
+        if (stand_alive(t.stand)) tag_apply_one(t, data);
+        else if (tag_newer(data, t)) { t.held = true; t.held_data = data; }   // writer dead: not a fact of this run yet
+    }
+}
+// every loop: reader ends of a writer stand that is not alive now rest, once per death
+void tag_expire()
+{
+    for (TagEnd &t : tends) {
+        if (!t.out || rested.count(t.stand) || stand_alive(t.stand)) continue;
+        const std::string stand = t.stand;
+        for (TagEnd &x : tends)
+            if (x.out && x.stand == stand) { tag_set(x, x.rest, "rest"); x.has_seq = false; }
+        auto a = alive_at.find(stand);
+        if (a == alive_at.end())
+            say(true, "%s: NATS tags: writer stand %s not alive (key %s, no alive) - its reader ends at rest\n",
+                tag(), stand.c_str(), tag_alive[stand].c_str());
+        else
+            say(true, "%s: NATS tags: writer stand %s dead (key %s, last alive %.1f s ago) - its reader ends at rest\n",
+                tag(), stand.c_str(), tag_alive[stand].c_str(), now_mono() - a->second);
+        rested[stand] = now_mono();
+    }
+}
+// direct gets of `keys`: liveness keys, then strobes, then data (data got later is at least as new as the
+// strobe got); handed back in the asked order. false = a request failed (the link)
+bool tag_snapshot(const std::vector<std::string> &keys, std::vector<std::pair<std::string, std::pair<std::string, double>>> &got)
+{
+    std::map<std::string, int> rank;
+    for (const TagEnd &t : tends) if (t.out) rank[t.key] = t.strobe ? 1 : 2;
+    std::vector<std::string> order;
+    for (const std::string &k : keys) if (std::find(order.begin(), order.end(), k) == order.end()) order.push_back(k);
+    std::vector<std::string> ask = order;
+    std::stable_sort(ask.begin(), ask.end(), [&](const std::string &a, const std::string &b) { return rank[a] < rank[b]; });
+    std::map<std::string, std::pair<std::string, double>> have;
+    for (const std::string &k : ask) {
+        std::string d;
+        double stored = 0;
+        int r = kv_get(k, d, stored);
+        if (r < 0) return false;
+        if (r > 0) have[k] = {d, stored};
+    }
+    for (const std::string &k : order) if (have.count(k)) got.push_back({k, have[k]});
+    return true;
+}
+void tag_revive()
+{
+    std::set<std::string> stands;
+    stands.swap(revived);
+    std::vector<std::string> keys;
+    for (const TagEnd &t : tends) if (t.out && stands.count(t.stand)) keys.push_back(t.key);
+    std::vector<std::pair<std::string, std::pair<std::string, double>>> got;
+    if (!tag_snapshot(keys, got)) { revived.insert(stands.begin(), stands.end()); return; }
+    for (auto &g : got)
+        for (TagEnd &t : tends)
+            if (t.out && t.key == g.first && stand_alive(t.stand)) tag_apply_one(t, g.second.first);
+}
+
+// -- writer: HAL -> KV. Strobes are READ first and PUT last: data put before a strobe is never older than it.
+void tag_push()
+{
+    struct R { Val v; double ts; bool ok; };
+    std::vector<R> rd(tends.size());
+    for (int pass = 0; pass < 2; pass++)
+        for (size_t k = 0; k < tends.size(); k++) {
+            TagEnd &t = tends[k];
+            if (t.out || t.strobe != (pass == 0)) continue;
+            Val v{};
+            int rc = hal_get_named(t.sig, t.src, t.type, v);
+            rd[k] = R{v, now_unix(), rc == 0};
+            if (rc && !t.said) say(false, "%s: NATS tag %s: %s %s: %s - not put yet\n", tag(), t.key.c_str(),
+                                   t.sig ? "signal" : "pin", t.src.c_str(), hal_err(rc));
+            t.said = rc != 0;
+        }
+    for (size_t k = 0; k < tends.size(); k++) {   // load order: data first
+        TagEnd &t = tends[k];
+        if (t.out || !rd[k].ok) continue;
+        Val v = rd[k].v;
+        bool same = t.put_any && (t.tt == T_FLOAT ? (v.d == t.last_put.d || (std::isnan(v.d) && std::isnan(t.last_put.d)))
+                                                  : v.i == t.last_put.i);
+        if (same) continue;
+        std::string body;
+        if (const char *bad = tag_pack(t, v, rd[k].ts, tag_next_seq(), body)) {
+            if (!t.said) say(true, "%s: NATS tag %s: %s - not put\n", tag(), t.key.c_str(), bad);
+            t.said = true;
+            continue;
+        }
+        kv_put(t.key, body);
+        t.last_put = v; t.put_any = true;
+    }
+}
+// every dir=in end put in this session (its source read): only then the stand says alive - a reader takes
+// the values in KV as of the writer's current life once it is alive, so an alive before them would hand it
+// the values of the PREVIOUS run (the bridge owned its pins and always read them; halnats waits for HAL)
+bool tag_all_put()
+{
+    for (const TagEnd &t : tends) if (!t.out && !t.put_any) return false;
+    return true;
+}
+void tag_keepalive(bool alive)
+{
+    if (tag_own_stand.empty() || (alive && !tag_all_put())) return;
+    kv_put(tag_alive[tag_own_stand], tag_pack_alive(tag_own_stand, alive, now_unix(), tag_next_seq()));
+    alive_sent = now_mono();
+}
+// quality of every read tag (bridge link-ok): link up, every writer stand alive, no rejected read tag
+bool tag_quality()
+{
+    if (!tag_has_readers()) { tag_reason.clear(); return tlink || tends.empty(); }
+    if (!tlink) { tag_reason = "NATS link down"; return false; }
+    std::string dead;
+    for (const auto &a : tag_alive_of) if (!stand_alive(a.second)) dead += (dead.empty() ? "" : ", ") + a.second;
+    if (!dead.empty()) tag_reason = "writer stand(s) dead: " + dead;
+    else if (!rejected.empty()) tag_reason = rejected.begin()->first + ": " + rejected.begin()->second;
+    else tag_reason.clear();
+    return tag_reason.empty();
+}
+// (re)connected: subscribed already (libnats resubscribes) - read current, then BIRTH the writer ends:
+// values first, then the alive key (a reader holding a stale value takes them first)
+bool tag_birth()
+{
+    std::vector<std::string> keys;
+    for (const auto &a : tag_alive_of) keys.push_back(a.first);
+    for (const TagEnd &t : tends) if (t.out) keys.push_back(t.key);
+    std::vector<std::pair<std::string, std::pair<std::string, double>>> got;
+    if (!tag_snapshot(keys, got)) return false;
+    double now = now_unix();
+    for (auto &g : got) {
+        double stored = g.second.second;
+        tag_apply(g.first, g.second.first, stored > 0 ? std::max(0.0, now - stored) : tag_ttl_s + 1);
+    }
+    for (TagEnd &t : tends) t.put_any = false;
+    tag_push();
+    alive_sent = -1e18;
+    tag_keepalive(true);
+    alive_born = tag_all_put();
+    return true;
+}
+void tags_step()
+{
+    if (tends.empty()) return;
+    bool conn = natsConnection_Status(nc) == NATS_CONN_STATUS_CONNECTED;
+    if (tag_lost.exchange(false) || (!conn && tlink)) {
+        // the link itself lost: no alive arrives - every writer is not alive now (rest in this loop)
+        tlink = false;
+        alive_at.clear();
+    }
+    if (conn && !tlink && tag_start && now_mono() >= tag_retry) {
+        if (tag_birth()) { tag_start = false; tlink = true; say(false, "%s: NATS tags: snapshot taken, %zu ends\n", tag(), tends.size()); }
+        else tag_retry = now_mono() + 1.0;          // the bridge's RETRY_S
+    }
+    std::deque<std::pair<std::string, std::string>> q;
+    { std::lock_guard<std::mutex> g(tq_mx); q.swap(tq); }
+    for (auto &m : q) tag_apply(m.first, m.second, 0);
+    if (conn && tlink && !revived.empty()) tag_revive();
+    tag_expire();
+    if (conn && tlink) {
+        tag_push();
+        // the first alive of a session right after the last value, then every TTL/3
+        if (!tag_own_stand.empty() && (now_mono() - alive_sent >= tag_ttl_s / 3 || !alive_born)) {
+            tag_keepalive(true);
+            alive_born = alive_sent >= 0 && tag_all_put();
+        }
+    }
+    if (!tag_ok_src.empty()) {
+        std::string before = tag_reason;
+        int ok = tag_quality() ? 1 : 0;
+        if (ok != tag_ok_last) {
+            hal_query_value_u v;
+            memset(&v, 0, sizeof v);
+            v.b = ok;
+            int rc = hal_set_named(tag_ok_sig, tag_ok_src, HAL_BOOL, v);
+            if (rc) { if (rc != tag_ok_err) say(true, "%s: NATS tag_ok -> %s: %s\n", tag(), tag_ok_src.c_str(), hal_err(rc)); tag_ok_err = rc; }
+            else {
+                tag_ok_err = 0;
+                if (ok) say(false, "%s: NATS tags: tag_ok 1\n", tag());
+                else say(true, "%s: NATS tags: tag_ok 0 - %s\n", tag(), tag_reason.c_str());
+                tag_ok_last = ok;
+            }
+        } else if (!ok && tag_reason != before) say(true, "%s: NATS tags: tag_ok 0 - %s\n", tag(), tag_reason.c_str());
+    }
+}
+
 // DCMD of an owner device: handed to the owner as is (it checks and queues; never under mx)
 void on_own_dcmd(natsConnection *, natsSubscription *, natsMsg *msg, void *closure)
 {
@@ -487,6 +1081,8 @@ void destroy_subs()
     natsSubscription_Destroy(ncmd_sub); ncmd_sub = nullptr;
     natsSubscription_Destroy(dcmd_sub); dcmd_sub = nullptr;
     natsSubscription_Destroy(state_sub); state_sub = nullptr;
+    for (natsSubscription *&s : tag_subs) { natsSubscription_Destroy(s); s = nullptr; }
+    tag_subs.clear();
     for (natsSubscription *&s : own_dcmd_subs) { natsSubscription_Destroy(s); s = nullptr; }
     own_dcmd_subs.clear();
 }
@@ -511,11 +1107,13 @@ void on_connected(natsConnection *, void *)
 {
     say(false, "%s: NATS connected - Sparkplug births follow\n", tag());
     need_birth = true;
+    tag_start = true;                            // tags: snapshot + BIRTH of the writer ends
 }
 void on_disconnected(natsConnection *, void *)
 {
     say(false, "%s: NATS disconnected\n", tag());
     errw.note("disconnect", "связь с брокером NATS потеряна");
+    tag_lost = true;
     std::lock_guard<std::mutex> g(mx);
     born = false;                                // no DDATA of a dead session; births on reconnect
 }
@@ -527,6 +1125,7 @@ void publisher()
             std::lock_guard<std::mutex> g(mx);
             if (own) own->pull();
             host_guard();
+            tags_step();
             if (!hpins.empty() && now_mono() - hal_last_read >= hal_period_s) { hal_last_read = now_mono(); hal_poll(); }
             if (natsConnection_Status(nc) == NATS_CONN_STATUS_CONNECTED) {
                 if (need_birth && (!own || own->ready())) { need_birth = false; births(); }
@@ -649,6 +1248,27 @@ bool num(const std::string &s, double &v)
     return !s.empty() && e && !*e && !errno && std::isfinite(v);
 }
 
+// safe=<v> of a row -> the value of its HAL type; nullptr = fine
+const char *safe_of(hal_type_t type, const std::string &s, hal_query_value_u &out)
+{
+    double v = 0;
+    if (!num(s, v)) return "a number";
+    if (type == HAL_BOOL) { if (v != 0 && v != 1) return "0|1"; out.b = v != 0; }
+    else if (type == HAL_REAL) out.r = v;
+    else if (v != std::floor(v) || (type == HAL_UINT && v < 0)) return "not its integer type";
+    else if (type == HAL_UINT) out.u = (uint64_t)v;
+    else out.s = (int64_t)v;
+    return nullptr;
+}
+// a KV key: NATS tokens of the KV alphabet, joined by '.'
+bool name_ok_kv(const std::string &k)
+{
+    if (k.empty() || k.front() == '.' || k.back() == '.' || k.find("..") != std::string::npos) return false;
+    for (char c : k)
+        if (!(isalnum((unsigned char)c) || c == '-' || c == '_' || c == '/' || c == '=' || c == '.')) return false;
+    return true;
+}
+
 bool load_pins(const std::string &path)
 {
     FILE *f = fopen(path.c_str(), "r");
@@ -699,12 +1319,7 @@ bool load_pins(const std::string &path)
             if (!good) break;
             if (!safe_s.empty()) {
                 if (!p.out) { bad("pin " + p.key + ": safe= on dir=in - only a command output has a safe state"); break; }
-                if (!num(safe_s, v)) { bad("pin " + p.key + ": safe=" + safe_s + " - a number"); break; }
-                if (p.type == HAL_BOOL) { if (v != 0 && v != 1) { bad("pin " + p.key + ": safe= 0|1"); break; } p.safe.b = v != 0; }
-                else if (p.type == HAL_REAL) p.safe.r = v;
-                else if (v != std::floor(v) || (p.type == HAL_UINT && v < 0)) { bad("pin " + p.key + ": safe=" + safe_s + " - not its integer type"); break; }
-                else if (p.type == HAL_UINT) p.safe.u = (uint64_t)v;
-                else p.safe.s = (int64_t)v;
+                if (const char *e = safe_of(p.type, safe_s, p.safe)) { bad("pin " + p.key + ": safe=" + safe_s + " - " + e); break; }
                 p.has_safe = true;
             }
             if (p.type != HAL_REAL) p.q = 0;
@@ -712,14 +1327,72 @@ bool load_pins(const std::string &path)
             if (p.type == HAL_REAL && !(p.q > 0))
                 say(false, "%s: NATS PINS pin %s: no q= - sent unquantized (db=%g)\n", tag(), p.key.c_str(), p.db);
             hpins.push_back(p);
+        } else if (a == "tag") {
+            if (w.size() < 3) { bad("tag <key> bit|s32|u32|s64|float dir=in|out src=|sig= writer= stand= alive= [strobe=1] [safe=]"); break; }
+            TagEnd t{};
+            t.key = w[1];
+            if (!name_ok_kv(t.key)) { bad("tag " + t.key + ": not a KV key (tokens of [-_A-Za-z0-9/=] by '.')"); break; }
+            int tt = -1;
+            for (int k = 0; k < 5; k++) if (w[2] == tag_type_names[k]) tt = k;
+            if (tt < 0) { bad("tag " + t.key + ": type '" + w[2] + "' - bit|s32|u32|s64|float (tag_envelope.HAL_TYPES)"); break; }
+            t.tt = (TagType)tt;
+            t.type = tt == T_BIT ? HAL_BOOL : tt == T_FLOAT ? HAL_REAL : tt == T_U32 ? HAL_UINT : HAL_SINT;
+            std::string dir, safe_s, alive;
+            for (size_t i = 3; i < w.size() && good; i++) {
+                const std::string &x = w[i];
+                if (x == "dir=in" || x == "dir=out") dir = x.substr(4);
+                else if (!x.compare(0, 4, "src=")) { t.src = x.substr(4); t.sig = false; }
+                else if (!x.compare(0, 4, "sig=")) { t.src = x.substr(4); t.sig = true; }
+                else if (!x.compare(0, 7, "writer=")) t.writer = x.substr(7);
+                else if (!x.compare(0, 6, "stand=")) t.stand = x.substr(6);
+                else if (!x.compare(0, 6, "alive=")) alive = x.substr(6);
+                else if (x == "strobe=1" || x == "strobe=0") t.strobe = x == "strobe=1";
+                else if (!x.compare(0, 5, "safe=")) safe_s = x.substr(5);
+                else bad("tag " + t.key + ": '" + x + "' - dir= src= sig= writer= stand= alive= strobe= safe=");
+            }
+            if (!good) break;
+            t.out = dir == "out";
+            if (dir.empty()) { bad("tag " + t.key + ": no dir=in|out"); break; }
+            if (t.src.empty()) { bad("tag " + t.key + ": no src=<pin> or sig=<signal> - the node reads/writes HAL by name"); break; }
+            if (t.writer.empty() || t.stand.empty() || alive.empty()) {
+                bad("tag " + t.key + ": writer=<equipment> stand=<writer stand> alive=<its liveness key> - all three (project_tags)"); break;
+            }
+            if (!name_ok_kv(alive)) { bad("tag " + t.key + ": alive=" + alive + " - not a KV key"); break; }
+            auto ka = tag_alive.find(t.stand);
+            if (ka != tag_alive.end() && ka->second != alive) { bad("tag " + t.key + ": stand " + t.stand + " has another alive= key above"); break; }
+            for (const auto &o : tag_alive)
+                if (o.second == alive && o.first != t.stand) { bad("tag " + t.key + ": alive=" + alive + " is stand " + o.first + "'s"); break; }
+            if (!good) break;
+            if (!t.out) {
+                if (!tag_own_stand.empty() && tag_own_stand != t.stand) { bad("tag " + t.key + ": dir=in of stand " + t.stand + ", the node's other dir=in are of " + tag_own_stand); break; }
+                tag_own_stand = t.stand;
+            }
+            memset(&t.rest, 0, sizeof t.rest);   // HAL default 0: a lost signal reads as off
+            if (!safe_s.empty()) {
+                if (!t.out) { bad("tag " + t.key + ": safe= on dir=in - only a reader end has a rest value"); break; }
+                if (const char *e = safe_of(t.type, safe_s, t.rest)) { bad("tag " + t.key + ": safe=" + safe_s + " - " + e); break; }
+            }
+            for (const TagEnd &o : tends) {
+                if (o.src == t.src && o.sig == t.sig) { bad("tag " + t.key + ": " + t.src + " twice in the tags"); break; }
+                if (!o.out && !t.out && o.key == t.key) { bad("tag " + t.key + ": two dir=in ends of one key"); break; }
+            }
+            for (const HPin &o : hpins) if (o.src == t.src && o.sig == t.sig && o.out && t.out) { bad("tag " + t.key + ": " + t.src + " is a pin dir=out too - one writer"); break; }
+            if (!good) break;
+            tag_alive[t.stand] = alive;
+            if (t.out) tag_alive_of[alive] = t.stand;
+            tends.push_back(t);
+        } else if (a == "tag_ok") {
+            if (w.size() != 2 || (w[1].compare(0, 4, "sig=") && w[1].compare(0, 4, "src=")) || w[1].size() < 5) { bad("tag_ok sig=<signal>|src=<pin>"); break; }
+            tag_ok_sig = !w[1].compare(0, 4, "sig="); tag_ok_src = w[1].substr(4);
         } else if (a == "scope_channel" || a == "scope_batch" || a == "scope_dt_ns" || a == "spb_keepalive_s" || a == "hz"
-                   || a == "spb_host_ttl_s") {
+                   || a == "spb_host_ttl_s" || a == "tag_ttl_s") {
             if (w.size() < 2 || !num(w[1], v) || v < 0) { bad(a + ": a number >= 0"); break; }
             if (a == "hz") { if (!(v > 0)) { bad("hz > 0"); break; } hal_period_s = 1.0 / v; }
             else if (a == "scope_channel") s_chan = (int)v;
             else if (a == "scope_batch") s_batch = (int)v;
             else if (a == "scope_dt_ns") s_dt_ns = (long)v;
             else if (a == "spb_host_ttl_s") host_ttl_s = v;
+            else if (a == "tag_ttl_s") tag_ttl_s = v;
             else keepalive_s = v;
         } else if (a == "scope_type") {
             if (w.size() < 2 || (w[1] != "double" && w[1] != "float")) { bad("scope_type double|float"); break; }
@@ -739,6 +1412,18 @@ bool load_pins(const std::string &path)
     }
     fclose(f);
     if (!good) return false;
+    if (!tends.empty()) {
+        if (!(tag_ttl_s > 0)) {
+            say(true, "%s: NATS PINS %s: tags without tag_ttl_s (the writer liveness TTL, tag_envelope.ALIVE_TTL_S) - NATS publishing refused\n",
+                tag(), path.c_str());
+            return false;
+        }
+        // data before strobes, readers and writers alike (stable: the rest keep the file order)
+        std::stable_sort(tends.begin(), tends.end(), [](const TagEnd &x, const TagEnd &y) { return x.strobe < y.strobe; });
+    } else if (!tag_ok_src.empty()) {
+        say(true, "%s: NATS PINS %s: tag_ok without tags - NATS publishing refused\n", tag(), path.c_str());
+        return false;
+    }
     if (!ignored.empty())
         say(false, "%s: NATS PINS %s: ignored (the environment / INI [NATS] give them):%s\n", tag(), path.c_str(), ignored.c_str());
     if (s_chan >= 0) {
@@ -877,6 +1562,18 @@ int start(const Config &c, int hal_comp_id, Owner *owner)
     bool has_out = false;
     for (const HPin &p : hpins) has_out = has_out || p.out;
     if (st == NATS_OK && has_out) st = natsConnection_Subscribe(&dcmd_sub, nc, s_dcmd_hal.c_str(), on_dcmd, nullptr);
+    // tags: watch the republish of every liveness key and reader key (libnats resubscribes on reconnect)
+    tag_seq = (int64_t)(now_unix() * 1e6);       // tag_envelope.Sequence: a restarted writer is newer
+    {
+        std::set<std::string> watch;
+        for (const auto &a : tag_alive_of) watch.insert(a.first);
+        for (const TagEnd &t : tends) if (t.out) watch.insert(t.key);
+        for (const std::string &k : watch) {
+            if (st != NATS_OK) break;
+            tag_subs.push_back(nullptr);
+            st = natsConnection_Subscribe(&tag_subs.back(), nc, ("kv.CELL." + k).c_str(), on_tag_msg, nullptr);
+        }
+    }
     if (st == NATS_OK && guard)
         st = natsConnection_Subscribe(&state_sub, nc, ("spBv1//0.STATE." + cfg.host).c_str(), on_state, nullptr);
     std::string own_cmds;
@@ -897,7 +1594,7 @@ int start(const Config &c, int hal_comp_id, Owner *owner)
         natsConnection_Destroy(nc); nc = nullptr;
         return -1;
     }
-    if (natsConnection_Status(nc) == NATS_CONN_STATUS_CONNECTED) need_birth = true;
+    if (natsConnection_Status(nc) == NATS_CONN_STATUS_CONNECTED) { need_birth = true; tag_start = true; }
     enabled = true;
     running = true;
     pub_thread = std::thread(publisher);
@@ -908,6 +1605,12 @@ int start(const Config &c, int hal_comp_id, Owner *owner)
     if (guard) say(false, "%s: NATS Primary Host %s: STATE spBv1//0.STATE.%s, silence %g s = offline\n",
                    tag(), cfg.host.c_str(), cfg.host.c_str(), host_ttl_s);
     if (!own_cmds.empty()) say(false, "%s: NATS commands <- %s\n", tag(), own_cmds.c_str());
+    for (const TagEnd &t : tends)
+        say(false, "%s: NATS tag %s %s %s %s %s (writer %s, stand %s)%s\n", tag(), tag_type_names[t.tt], t.key.c_str(),
+            t.out ? "->" : "<-", t.sig ? "signal" : "pin", t.src.c_str(), t.writer.c_str(), t.stand.c_str(), t.strobe ? " strobe" : "");
+    if (!tends.empty()) say(false, "%s: NATS tags: KV CELL, writer TTL %g s%s%s\n", tag(), tag_ttl_s,
+                            tag_own_stand.empty() ? "" : (", alive " + tag_alive[tag_own_stand]).c_str(),
+                            tag_ok_src.empty() ? "" : (", tag_ok -> " + tag_ok_src).c_str());
     say(false, "%s: NATS %s%s as Sparkplug node %s/%s, %zu own metrics, %zu hal, %zu scope columns, snapshot on %s\n",
         tag(), cfg.url.c_str(), cfg.user.empty() ? "" : " (user)", cfg.group.c_str(), cfg.node.c_str(),
         own ? own->aliases() : (size_t)0, hpins.size(), scols.size(), s_snapshot.c_str());
@@ -927,6 +1630,7 @@ void stop()
         Metric &m = b.add("bdSeq", 0, HN_DT(Int64), 0);
         m.value_case = HN_V(LONG_VALUE); m.long_value = bdseq;
         if (natsConnection_Status(nc) == NATS_CONN_STATUS_CONNECTED) {
+            if (tlink) tag_keepalive(false);         // a clean exit of the tag writer: alive false (NDEATH)
             send(s_ndeath, b, false);                // NDEATH carries no seq (6.4.5)
             // ПРЕДПОЛОЖЕНИЕ, не замер: 1 s for NDEATH to leave at shutdown
             natsConnection_FlushTimeout(nc, 1000);
