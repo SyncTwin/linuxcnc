@@ -19,6 +19,7 @@
 
 #ifdef __linux__
 #include <sys/fsuid.h>
+#include <sys/auxv.h>
 #endif
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -559,6 +560,62 @@ static int do_comp_args(void *module, const std::vector<std::string> &args) {
     return 0;
 }
 
+// A setuid rtapi_app must not dlopen code from a place an unprivileged user
+// can change: in secure-execution mode (AT_SECURE, as ld.so does for
+// LD_LIBRARY_PATH) every component of the path must be owned by root and
+// not writable by group or others.
+static bool trusted_path(const std::string &path) {
+    char *real = realpath(path.c_str(), NULL);
+    if (!real)
+        return false;
+    std::string p(real);
+    free(real);
+    for (;;) {
+        struct stat st;
+        if (stat(p.c_str(), &st) != 0 || st.st_uid != 0 || (st.st_mode & (S_IWGRP | S_IWOTH)))
+            return false;
+        if (p == "/")
+            return true;
+        size_t slash = p.rfind('/');
+        p = slash == 0 ? "/" : p.substr(0, slash);
+    }
+}
+
+// <name>.so is looked up in the directories of RTAPI_MODULE_PATH (':'-separated,
+// empty entries skipped), then in EMC2_RTLIB_DIR.  The first existing file wins;
+// an existing but untrusted one (see trusted_path) is refused, not skipped.
+static int find_module(const std::string &name, std::string &what) {
+    const char *env = getenv("RTAPI_MODULE_PATH");
+    if (env) {
+        bool secure = getauxval(AT_SECURE) != 0;
+        std::string dirs(env);
+        size_t start = 0;
+        while (start <= dirs.size()) {
+            size_t end = dirs.find(':', start);
+            if (end == std::string::npos)
+                end = dirs.size();
+            std::string dir(dirs, start, end - start);
+            start = end + 1;
+            if (dir.empty())
+                continue;
+            std::string candidate = fmt::format("{}/{}.so", dir, name);
+            struct stat st;
+            if (stat(candidate.c_str(), &st) != 0)
+                continue;
+            if (secure && !trusted_path(candidate)) {
+                rtapi_print_msg(RTAPI_MSG_ERR,
+                    "%s: %s is not trusted (RTAPI_MODULE_PATH): the file and every directory above it must be owned by root and not writable by group or others\n",
+                    name.c_str(), candidate.c_str());
+                return -1;
+            }
+            what = candidate;
+            return 0;
+        }
+    }
+    what = fmt::format("{}/{}.so", EMC2_RTLIB_DIR, name);
+    return 0;
+}
+
 static int do_load_cmd(const std::string &name, const std::vector<std::string> &args) {
     void *w = modules[name];
     if (w == NULL) {
@@ -572,7 +629,8 @@ static int do_load_cmd(const std::string &name, const std::vector<std::string> &
             return -1;
         }
         std::string what;
-        what = fmt::format("{}/{}.so", EMC2_RTLIB_DIR, name);
+        if (find_module(name, what) != 0)
+            return -1;
         void *module = modules[name] = dlopen(what.c_str(), RTLD_GLOBAL | RTLD_NOW);
         if (!module) {
             rtapi_print_msg(RTAPI_MSG_ERR, "%s: dlopen: %s\n", name.c_str(), dlerror());
