@@ -1197,23 +1197,36 @@ void scope_main()
         nanosleep(&w, nullptr);
     }
     int ne = hal_stream_element_count(&st);
-    int ncol = (int)scols.size() < ne ? (int)scols.size() : ne;
+    // The scope rows, read ONCE under mx: a Rebirth (reload, publisher thread, under mx) swaps the PINS globals
+    // out and parses the file again, so scols / s_batch / s_dt_ns are empty or half-filled for that while - a
+    // read outside mx was scols[c] of an empty vector (the node died in a Rebirth). reload refuses a file whose
+    // scope rows differ (same_scope), so this copy stays the scope of the node for the thread's life.
+    std::vector<double> scale;
+    int batch;
+    long dt_ns;
+    bool as_float;
+    {
+        std::lock_guard<std::mutex> g(mx);
+        for (const SCol &c : scols) scale.push_back(c.scale);
+        batch = s_batch; dt_ns = s_dt_ns; as_float = s_float;
+    }
+    int ncol = (int)scale.size() < ne ? (int)scale.size() : ne;
     // the FIFO holds an old tail (up to its depth) at attach: drop exactly what is queued now
     int stale = hal_stream_depth(&st), dropped_rows = 0;
     std::vector<hal_stream_data_u> row(ne > 0 ? ne : 1);
     unsigned sn;
     while (dropped_rows < stale && hal_stream_read(&st, row.data(), &sn) == 0) dropped_rows++;
     say(false, "%s: NATS scope: sampler channel %d, %d columns (%d in the conf), dropped stale tail %d\n",
-        tag(), s_chan, ne, (int)scols.size(), dropped_rows);
-    double dt = s_dt_ns / 1e9;
-    std::vector<double> col((size_t)s_batch * (size_t)(ncol > 0 ? ncol : 1));   // column-major
+        tag(), s_chan, ne, (int)scale.size(), dropped_rows);
+    double dt = dt_ns / 1e9;
+    std::vector<double> col((size_t)batch * (size_t)(ncol > 0 ? ncol : 1));   // column-major
     std::vector<double> sent_last(ncol > 0 ? ncol : 1);
     std::vector<char> sent_ok(ncol > 0 ? ncol : 1, 0);
     { std::lock_guard<std::mutex> g(mx); s_last.assign(ncol > 0 ? ncol : 0, 0.0); s_last_ts = 0; }
     while (running) {
         int n = 0;
-        while (n < s_batch && running) {
-            if (!hal_stream_readable(&st)) { struct timespec w = {0, (long)(s_dt_ns > 0 ? s_dt_ns : 1000000)}; nanosleep(&w, nullptr); continue; }
+        while (n < batch && running) {
+            if (!hal_stream_readable(&st)) { struct timespec w = {0, (long)(dt_ns > 0 ? dt_ns : 1000000)}; nanosleep(&w, nullptr); continue; }
             if (hal_stream_read(&st, row.data(), &sn) < 0) break;
             for (int c = 0; c < ncol; c++) {
                 double x;
@@ -1223,7 +1236,7 @@ void scope_main()
                 case HAL_UINT: x = (double)row[c].u; break;
                 default: x = row[c].f; break;
                 }
-                col[(size_t)c * s_batch + n] = x * scols[c].scale;
+                col[(size_t)c * batch + n] = x * scale[c];
             }
             n++;
         }
@@ -1238,16 +1251,16 @@ void scope_main()
         Batch b;
         for (int c = 0; c < ncol; c++) {
             // report by exception: a column constant at its last sent value is not sent (the birth carries it)
-            double *x = &col[(size_t)c * s_batch];
+            double *x = &col[(size_t)c * batch];
             s_last[c] = x[n - 1];
             bool same = sent_ok[c] && x[0] == sent_last[c];
             for (int i = 1; same && i < n; i++) same = x[i] == x[0];
             if (same) continue;
             sent_ok[c] = 1; sent_last[c] = x[n - 1];
-            if (s_float) { float *f = (float *)x; for (int i = 0; i < n; i++) f[i] = (float)x[i]; }
+            if (as_float) { float *f = (float *)x; for (int i = 0; i < n; i++) f[i] = (float)x[i]; }
             Metric &m = b.add(std::string(), scope_alias0 + 1 + c, 0, ts);
             m.value_case = HN_V(BYTES_VALUE);
-            m.bytes_value.len = (size_t)n * (s_float ? 4 : 8);   // packed LE float32/float64
+            m.bytes_value.len = (size_t)n * (as_float ? 4 : 8);   // packed LE float32/float64
             m.bytes_value.data = (uint8_t *)x;
         }
         if (b.ms.empty()) continue;
@@ -1532,10 +1545,28 @@ bool pins_check()
     return true;
 }
 
-// Every subscription of the node on the current set. Called at start and on every Rebirth: a fresh SUB is
-// judged by the broker's permissions of NOW (a SUB denied before a permission change stays dead in libnats).
+// What the subscriptions of the current set are: the subjects that depend on the PINS rows (DCMD of hal when a
+// row is an output, the tag keys watched, STATE of the Primary Host when safe= rows guard). The rest is fixed.
+std::string subs_key()
+{
+    bool has_out = false;
+    for (const HPin &p : hpins) has_out = has_out || p.out;
+    std::set<std::string> watch;
+    for (const auto &a : tag_alive_of) watch.insert(a.first);
+    for (const TagEnd &t : tends) if (t.out) watch.insert(t.key);
+    std::string k = std::string(has_out ? "o" : "-") + (guard ? "g" : "-");
+    for (const std::string &w : watch) k += "\n" + w;
+    return k;
+}
+std::string subs_made;                           // subs_key() of the subscriptions made
+uint64_t subs_denied = 0;                        // errw.sub_denied_count() when they were made
+
+// Every subscription of the node on the current set. Called at start and on a Rebirth that needs it: a fresh
+// SUB is judged by the broker's permissions of NOW (a SUB denied before a permission change stays dead in libnats).
 natsStatus subscribe_all()
 {
+    subs_made = subs_key();
+    subs_denied = errw.sub_denied_count();
     natsStatus st = natsConnection_Subscribe(&snap_sub, nc, s_snapshot.c_str(), on_snapshot, nullptr);
     if (st == NATS_OK) st = natsConnection_Subscribe(&ncmd_sub, nc, s_ncmd.c_str(), on_ncmd, nullptr);
     bool has_out = false;
@@ -1565,7 +1596,11 @@ natsStatus subscribe_all()
 // Sparkplug B 3.0 Node Control/Rebirth (and SIGHUP of halnats): the node's definition is the PINS file, so a
 // Rebirth re-reads it - a guest attached / detached on the fly gets its rows into NBIRTH + DBIRTH (same bdSeq,
 // spec 6.4.x: a Rebirth is births, not a new session), the rows of a removed one are gone. A refused file
-// keeps the previous set (said). Subscriptions are made again in both cases. Publisher thread, under mx.
+// keeps the previous set (said). Sparkplug B: a Rebirth is births - the subscriptions are made again only when
+// the set's subjects changed or the broker refused a SUB since they were made (permissions may have changed).
+// Dropping a subscription under mx is safe: libnats calls back on its dispatcher thread and frees the
+// subscription there only after the callback returned (nats.c dispatch.c:285); our callbacks take mx / tq_mx and
+// act on the current set; waiting for them here (drain) would deadlock on mx. Publisher thread, under mx.
 void reload()
 {
     PinsSet old;
@@ -1584,10 +1619,15 @@ void reload()
     // the node's own stand leaves the tags: say it dead now, not after the readers' TTL
     if (why.empty() && conn && tlink && !old.tag_own_stand.empty() && old.tag_own_stand != tag_own_stand)
         kv_put(old.tag_alive[old.tag_own_stand], tag_pack_alive(old.tag_own_stand, false, now_unix(), tag_next_seq()));
-    destroy_subs();
-    natsStatus st = subscribe_all();
-    if (st != NATS_OK)
-        say(true, "%s: NATS Rebirth: subscribe: %s - the next Rebirth tries again\n", tag(), natsStatus_GetText(st));
+    bool resub = subs_key() != subs_made || errw.sub_denied_count() != subs_denied;
+    if (resub) {
+        destroy_subs();
+        natsStatus st = subscribe_all();
+        if (st != NATS_OK) {
+            subs_made.clear();                   // the next Rebirth tries again
+            say(true, "%s: NATS Rebirth: subscribe: %s - the next Rebirth tries again\n", tag(), natsStatus_GetText(st));
+        }
+    }
     scope_alias0 = hal_alias0 + hpins.size();
     hal_born = false;
     held_safe = false;                           // host_guard judges again: new safe= rows written safe if the host is away
@@ -1601,8 +1641,9 @@ void reload()
     } else tag_start = true;
     need_birth = true;
     if (why.empty())
-        say(false, "%s: NATS Rebirth: PINS %s re-read - %zu hal (was %zu), %zu tags (was %zu); births follow\n",
-            tag(), cfg.pins.c_str(), hpins.size(), old.hpins.size(), tends.size(), old.tends.size());
+        say(false, "%s: NATS Rebirth: PINS %s re-read - %zu hal (was %zu), %zu tags (was %zu), %s; births follow\n",
+            tag(), cfg.pins.c_str(), hpins.size(), old.hpins.size(), tends.size(), old.tends.size(),
+            resub ? "resubscribed" : "subscriptions kept");
 }
 
 } // namespace

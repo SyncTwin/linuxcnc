@@ -15,6 +15,7 @@
 #ifndef HALNATS_ERR_HH
 #define HALNATS_ERR_HH
 
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <string>
@@ -41,6 +42,9 @@ public:
             if (t == n) { say(true, "halnats: %s (x%llu)\n", msg.c_str(), (unsigned long long)n); break; }
     }
     uint64_t total() const { std::lock_guard<std::mutex> g(mx_); return total_; }
+    // SUBs the broker refused so far: a Rebirth resubscribes only when this moved (permissions may have changed)
+    void sub_denied() { sub_denied_++; }
+    uint64_t sub_denied_count() const { return sub_denied_; }
     std::string last() const { std::lock_guard<std::mutex> g(mx_); return last_; }
 
 private:
@@ -48,6 +52,7 @@ private:
     std::map<std::string, uint64_t> per_;
     uint64_t total_ = 0;
     std::string last_;
+    std::atomic<uint64_t> sub_denied_{0};
 };
 
 // text of the broker's -ERR: `Permissions Violation for Publish to "subj"` (or Subscription to)
@@ -76,6 +81,7 @@ inline void on_async_error(natsConnection *c, natsSubscription *sub, natsStatus 
     if (c) natsConnection_GetLastError(c, &txt);
     std::string t = txt && *txt ? txt : natsStatus_GetText(err);
     std::string perm = perm_text(t);
+    if (t.find("Permissions Violation for Subscription to ") != std::string::npos) w->sub_denied();
     if (!perm.empty()) { w->note(perm, perm); return; }
     if (err == NATS_SLOW_CONSUMER) {
         const char *s = sub ? natsSubscription_GetSubject(sub) : nullptr;
