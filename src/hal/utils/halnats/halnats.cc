@@ -123,6 +123,8 @@ long s_dt_ns = 0;
 bool s_float = false;
 struct SCol { std::string key, ch; double scale; };
 std::vector<SCol> scols;
+std::vector<double> s_last;                      // under mx: the last value read of each scope column
+uint64_t s_last_ts = 0;                          // under mx: ms of that row; 0 = nothing read yet
 int hal_comp = -1;
 
 uint64_t hal_alias0 = 0, scope_alias0 = 0;      // after the owner's 1..N
@@ -320,10 +322,19 @@ void scope_birth()
     Batch b;
     Metric &m = b.add("dt_ns", scope_alias0, HN_DT(Int64), 0);
     m.value_case = HN_V(LONG_VALUE); m.long_value = (uint64_t)s_dt_ns;
-    for (size_t c = 0; c < scols.size(); c++) {  // declared, empty array: values come in DDATA
+    // Sparkplug B: the birth carries the current value of every metric - a one-element array of the last
+    // row read (report by exception skips a column standing at it); nothing read yet - declared, empty
+    std::vector<double> d(scols.size());
+    std::vector<float> f(scols.size());
+    for (size_t c = 0; c < scols.size(); c++) {
+        bool have = s_last_ts && c < s_last.size();
         Metric &mc = b.add(scols[c].key + "/" + scols[c].ch, scope_alias0 + 1 + c,
-                           s_float ? HN_DT(FloatArray) : HN_DT(DoubleArray), 0);
+                           s_float ? HN_DT(FloatArray) : HN_DT(DoubleArray), have ? s_last_ts : 0);
         mc.value_case = HN_V(BYTES_VALUE); mc.bytes_value.len = 0; mc.bytes_value.data = nullptr;
+        if (!have) continue;
+        d[c] = s_last[c]; f[c] = (float)s_last[c];
+        mc.bytes_value.len = s_float ? 4 : 8;
+        mc.bytes_value.data = s_float ? (uint8_t *)&f[c] : (uint8_t *)&d[c];
     }
     send(s_dbirth[d_scope], b, true);
 }
@@ -1198,6 +1209,7 @@ void scope_main()
     std::vector<double> col((size_t)s_batch * (size_t)(ncol > 0 ? ncol : 1));   // column-major
     std::vector<double> sent_last(ncol > 0 ? ncol : 1);
     std::vector<char> sent_ok(ncol > 0 ? ncol : 1, 0);
+    { std::lock_guard<std::mutex> g(mx); s_last.assign(ncol > 0 ? ncol : 0, 0.0); s_last_ts = 0; }
     while (running) {
         int n = 0;
         while (n < s_batch && running) {
@@ -1222,10 +1234,12 @@ void scope_main()
         double t_first = t_last - (n - 1) * dt;
         uint64_t ts = (uint64_t)llround(t_first * 1000.0);
         std::lock_guard<std::mutex> g(mx);       // scope_alias0 moves with the hal rows (Rebirth reload)
+        s_last_ts = (uint64_t)llround(t_last * 1000.0);
         Batch b;
         for (int c = 0; c < ncol; c++) {
-            // report by exception: a column constant at its last sent value is not sent
+            // report by exception: a column constant at its last sent value is not sent (the birth carries it)
             double *x = &col[(size_t)c * s_batch];
+            s_last[c] = x[n - 1];
             bool same = sent_ok[c] && x[0] == sent_last[c];
             for (int i = 1; same && i < n; i++) same = x[i] == x[0];
             if (same) continue;
