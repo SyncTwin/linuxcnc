@@ -13,6 +13,13 @@
 *            alias with halcmd's rules (sig=: a signal without a writer, `sets`; src=: an
 *            unlinked IN pin, `setp`); a message is checked whole before any write; the
 *            value goes out read back by the next DDATA.
+*            safe=<v> (dir=out only): the pin's safe state, Sparkplug B 3.0 Primary Host
+*            awareness (spec 7.x STATE): while the Primary Host is not online - at start until
+*            its first STATE online, on STATE online=false, or after spb_host_ttl_s without a
+*            STATE (NATS has no retain/Will: the host repeats it) - every safe= row is written
+*            its value once and DCMD to those rows is refused; STATE online again lets commands
+*            through (the safe values stay until a command changes them).
+*     spb_host_ttl_s <s>    silence of the Primary Host STATE that counts as offline (needed with safe=)
 *     hz <f>                read rate of the hal sources (else every publisher period)
 *     spb_keepalive_s <s>   an empty DDATA of hal after s of silence
 *     scope_channel <n> | scope_batch <n> | scope_dt_ns <n> | scope_type double|float |
@@ -67,6 +74,8 @@ struct HPin {
     bool sig;                                    // sig=<signal>, else src=<pin>
     std::string src;
     double q, db;
+    bool has_safe;                               // dir=out safe=<v>: written while the Primary Host is away
+    hal_query_value_u safe;
     Val v, last;                                 // last read / last sent (quantized)
     uint64_t ts;
     bool ok, sent, said;
@@ -76,6 +85,14 @@ bool hal_born = false;                           // under mx
 double keepalive_s = 0;                          // spb_keepalive_s of the file; 0 = none
 double hal_period_s = 0;                         // 1 / hz of the file; 0 = every publisher period
 double hal_last_read = 0;
+
+// Primary Host awareness (safe= rows): STATE spBv1//0.STATE.<host> {online, timestamp}
+double host_ttl_s = 0;                           // spb_host_ttl_s of the file
+std::atomic<bool> host_online{false};            // the last STATE said online (nats thread)
+std::atomic<double> host_seen{0};                // CLOCK_MONOTONIC of that STATE
+std::atomic<bool> held_safe{false};              // safe values written, DCMD to safe= rows refused
+bool guard = false;                              // safe= rows and a Primary Host id
+natsSubscription *state_sub = nullptr;
 
 // device scope: the sampler FIFO
 int s_chan = -1, s_batch = 0;
@@ -338,6 +355,18 @@ void on_snapshot(natsConnection *, natsSubscription *, natsMsg *msg, void *)
 
 // ---- commands ----
 
+// write a dir=out row with halcmd's rules (sig=: `sets` on a signal without a writer; src=: `setp` on an unlinked IN pin)
+void hal_write(const HPin &p, hal_query_value_u v, const char *why)
+{
+    hal_query_t q;
+    memset(&q, 0, sizeof q);
+    q.name = p.src.c_str();
+    int rc;
+    if (p.sig) { q.qtype = HAL_QTYPE_SIGNAL; q.sig.type = p.type; q.sig.value = v; rc = hal_set_s(&q, nullptr, nullptr); }
+    else { q.qtype = HAL_QTYPE_PIN; q.pp.type = p.type; q.pp.value = v; rc = hal_set_p(&q, nullptr, nullptr); }
+    if (rc) say(true, "%s: NATS %s hal %s -> %s: %s\n", tag(), why, p.metric.c_str(), p.src.c_str(), hal_err(rc));
+}
+
 // a DCMD metric -> the value for its pin, by the pin's type (hal2spb's rules); nullptr = fine
 const char *cmd_value(const Metric *m, const HPin &p, hal_query_value_u &out)
 {
@@ -405,15 +434,38 @@ void on_dcmd(natsConnection *, natsSubscription *, natsMsg *msg, void *)
         cmds.push_back(c);
     }
     sparkplug_b__payload__free_unpacked(pl, nullptr);
+    if (!bad && held_safe)
+        for (const Cmd &c : cmds)
+            if (c.p->has_safe) { who = c.p->metric; bad = "held safe: the Primary Host is not online (STATE)"; break; }
     if (bad) { say(true, "%s: NATS DCMD hal refused (%zu cmds): %s: %s\n", tag(), cmds.size(), who.c_str(), bad); return; }
-    for (const Cmd &c : cmds) {
-        hal_query_t q;
-        memset(&q, 0, sizeof q);
-        q.name = c.p->src.c_str();
-        int rc;
-        if (c.p->sig) { q.qtype = HAL_QTYPE_SIGNAL; q.sig.type = c.p->type; q.sig.value = c.v; rc = hal_set_s(&q, nullptr, nullptr); }
-        else { q.qtype = HAL_QTYPE_PIN; q.pp.type = c.p->type; q.pp.value = c.v; rc = hal_set_p(&q, nullptr, nullptr); }
-        if (rc) say(true, "%s: NATS DCMD hal %s -> %s: %s\n", tag(), c.p->metric.c_str(), c.p->src.c_str(), hal_err(rc));
+    for (const Cmd &c : cmds) hal_write(*c.p, c.v, "DCMD");
+}
+
+// STATE of the Primary Host (JSON {"online": bool, "timestamp": ms}); anything else is not online
+void on_state(natsConnection *, natsSubscription *, natsMsg *msg, void *)
+{
+    std::string d(natsMsg_GetData(msg) ? natsMsg_GetData(msg) : "", natsMsg_GetDataLength(msg));
+    natsMsg_Destroy(msg);
+    std::string t;
+    for (char c : d) if (c != ' ' && c != '\t' && c != '\r' && c != '\n') t += c;
+    host_online = t.find("\"online\":true") != std::string::npos;
+    host_seen = now_mono();
+}
+
+// the guard, in the publisher loop: host away -> every safe= row its value, once per absence
+void host_guard()
+{
+    if (!guard) return;
+    bool alive = host_online && now_mono() - host_seen < host_ttl_s;
+    if (!alive && !held_safe) {
+        held_safe = true;
+        size_t n = 0;
+        for (const HPin &p : hpins) if (p.has_safe) { hal_write(p, p.safe, "safe"); n++; }
+        say(true, "%s: NATS Primary Host %s not online (%s) - %zu outputs written safe, their commands refused\n",
+            tag(), cfg.host.c_str(), host_seen == 0 ? "no STATE yet" : host_online ? "STATE silent" : "STATE offline", n);
+    } else if (alive && held_safe) {
+        held_safe = false;
+        say(false, "%s: NATS Primary Host %s online - commands to the safe outputs taken again\n", tag(), cfg.host.c_str());
     }
 }
 
@@ -434,6 +486,7 @@ void destroy_subs()
     natsSubscription_Destroy(snap_sub); snap_sub = nullptr;
     natsSubscription_Destroy(ncmd_sub); ncmd_sub = nullptr;
     natsSubscription_Destroy(dcmd_sub); dcmd_sub = nullptr;
+    natsSubscription_Destroy(state_sub); state_sub = nullptr;
     for (natsSubscription *&s : own_dcmd_subs) { natsSubscription_Destroy(s); s = nullptr; }
     own_dcmd_subs.clear();
 }
@@ -473,6 +526,7 @@ void publisher()
         {
             std::lock_guard<std::mutex> g(mx);
             if (own) own->pull();
+            host_guard();
             if (!hpins.empty() && now_mono() - hal_last_read >= hal_period_s) { hal_last_read = now_mono(); hal_poll(); }
             if (natsConnection_Status(nc) == NATS_CONN_STATUS_CONNECTED) {
                 if (need_birth && (!own || own->ready())) { need_birth = false; births(); }
@@ -620,6 +674,7 @@ bool load_pins(const std::string &path)
         if (a == "pin") {
             if (w.size() < 3) { bad("pin <key> <type> ..."); break; }
             HPin p{};
+            std::string safe_s;
             p.key = w[1]; p.metric = w[1];
             for (char &c : p.metric) if (c == '.') c = '/';
             if (w[2] == "bool") p.type = HAL_BOOL;
@@ -634,24 +689,37 @@ bool load_pins(const std::string &path)
                 else if (!t.compare(0, 4, "sig=")) { p.src = t.substr(4); p.sig = true; }
                 else if (!t.compare(0, 2, "q=")) { if (!num(t.substr(2), v)) bad(p.key + ": " + t); p.q = std::fabs(v); }
                 else if (!t.compare(0, 3, "db=")) { if (!num(t.substr(3), v)) bad(p.key + ": " + t); p.db = v; }
+                else if (!t.compare(0, 5, "safe=")) safe_s = t.substr(5);
                 else if (!t.compare(0, 4, "hal=")) {}   // hal2spb's own pin name: the node makes no pins
-                else bad("pin " + p.key + ": '" + t + "' - dir= src= sig= q= db=");
+                else bad("pin " + p.key + ": '" + t + "' - dir= src= sig= q= db= safe=");
             }
             if (!good) break;
             if (p.src.empty()) { bad("pin " + p.key + ": no src=<pin> or sig=<signal> - the node reads HAL by name, it makes no pins"); break; }
             for (const HPin &o : hpins) if (o.metric == p.metric) { bad("pin " + p.key + ": a second row of the same metric"); break; }
             if (!good) break;
+            if (!safe_s.empty()) {
+                if (!p.out) { bad("pin " + p.key + ": safe= on dir=in - only a command output has a safe state"); break; }
+                if (!num(safe_s, v)) { bad("pin " + p.key + ": safe=" + safe_s + " - a number"); break; }
+                if (p.type == HAL_BOOL) { if (v != 0 && v != 1) { bad("pin " + p.key + ": safe= 0|1"); break; } p.safe.b = v != 0; }
+                else if (p.type == HAL_REAL) p.safe.r = v;
+                else if (v != std::floor(v) || (p.type == HAL_UINT && v < 0)) { bad("pin " + p.key + ": safe=" + safe_s + " - not its integer type"); break; }
+                else if (p.type == HAL_UINT) p.safe.u = (uint64_t)v;
+                else p.safe.s = (int64_t)v;
+                p.has_safe = true;
+            }
             if (p.type != HAL_REAL) p.q = 0;
             else if (p.q > 0 && !(p.db > 0)) p.db = p.q;   // deadband = one quantum
             if (p.type == HAL_REAL && !(p.q > 0))
                 say(false, "%s: NATS PINS pin %s: no q= - sent unquantized (db=%g)\n", tag(), p.key.c_str(), p.db);
             hpins.push_back(p);
-        } else if (a == "scope_channel" || a == "scope_batch" || a == "scope_dt_ns" || a == "spb_keepalive_s" || a == "hz") {
+        } else if (a == "scope_channel" || a == "scope_batch" || a == "scope_dt_ns" || a == "spb_keepalive_s" || a == "hz"
+                   || a == "spb_host_ttl_s") {
             if (w.size() < 2 || !num(w[1], v) || v < 0) { bad(a + ": a number >= 0"); break; }
             if (a == "hz") { if (!(v > 0)) { bad("hz > 0"); break; } hal_period_s = 1.0 / v; }
             else if (a == "scope_channel") s_chan = (int)v;
             else if (a == "scope_batch") s_batch = (int)v;
             else if (a == "scope_dt_ns") s_dt_ns = (long)v;
+            else if (a == "spb_host_ttl_s") host_ttl_s = v;
             else keepalive_s = v;
         } else if (a == "scope_type") {
             if (w.size() < 2 || (w[1] != "double" && w[1] != "float")) { bad("scope_type double|float"); break; }
@@ -707,14 +775,15 @@ int configure(Config &c, const char *inifile, const char *node_suffix, double de
     c.pass = env("SYNCTWIN_NATS_PASS");
     c.group = env("SYNCTWIN_BOX_ID");
     c.node = env("NODE_ID");
+    c.host = env("SYNCTWIN_SPB_PRIMARY_HOST");
     if (!c.node.empty() && node_suffix) c.node += node_suffix;
     c.period_s = default_period;
     if (inifile) {
         IniFile ini(inifile);
         if (ini) {
-            const char *keys[] = {"URL", "USER", "PASS", "GROUP", "NODE"};
-            std::string *dst[] = {&c.url, &c.user, &c.pass, &c.group, &c.node};
-            for (int k = 0; k < 5; k++)
+            const char *keys[] = {"URL", "USER", "PASS", "GROUP", "NODE", "PRIMARY_HOST"};
+            std::string *dst[] = {&c.url, &c.user, &c.pass, &c.group, &c.node, &c.host};
+            for (int k = 0; k < 6; k++)
                 if (auto v = ini.findString(keys[k], "NATS")) *dst[k] = *v;
             c.period_s = ini.findRealV("PUBLISH_PERIOD", "NATS", default_period);
             if (auto pins = ini.findString("PINS", "NATS")) {
@@ -753,6 +822,20 @@ int start(const Config &c, int hal_comp_id, Owner *owner)
     if (!(cfg.period_s > 0)) cfg.period_s = hal_period_s;
     if (!(cfg.period_s > 0)) {
         say(true, "%s: NATS: no publisher period - INI [NATS] PUBLISH_PERIOD or PINS hz - publishing refused\n", tag());
+        return -1;
+    }
+    size_t n_safe = 0;
+    for (const HPin &p : hpins) n_safe += p.has_safe;
+    if (n_safe && cfg.host.empty())
+        say(true, "%s: NATS PINS: %zu safe= outputs but no Primary Host id (SYNCTWIN_SPB_PRIMARY_HOST, INI [NATS] "
+            "PRIMARY_HOST) - they are NOT made safe when the host goes away\n", tag(), n_safe);
+    else if (n_safe && !(host_ttl_s > 0)) {
+        say(true, "%s: NATS PINS: safe= outputs without spb_host_ttl_s - publishing refused\n", tag());
+        return -1;
+    }
+    guard = n_safe && !cfg.host.empty() && cfg.host.find_first_of(".*> ") == std::string::npos;
+    if (n_safe && !cfg.host.empty() && !guard) {
+        say(true, "%s: NATS Primary Host id '%s' is not a NATS token - publishing refused\n", tag(), cfg.host.c_str());
         return -1;
     }
     hal_alias0 = (own ? own->aliases() : 0) + 1;
@@ -794,6 +877,8 @@ int start(const Config &c, int hal_comp_id, Owner *owner)
     bool has_out = false;
     for (const HPin &p : hpins) has_out = has_out || p.out;
     if (st == NATS_OK && has_out) st = natsConnection_Subscribe(&dcmd_sub, nc, s_dcmd_hal.c_str(), on_dcmd, nullptr);
+    if (st == NATS_OK && guard)
+        st = natsConnection_Subscribe(&state_sub, nc, ("spBv1//0.STATE." + cfg.host).c_str(), on_state, nullptr);
     std::string own_cmds;
     if (own) {
         own_dcmd_dev.clear();
@@ -818,8 +903,10 @@ int start(const Config &c, int hal_comp_id, Owner *owner)
     pub_thread = std::thread(publisher);
     if (s_chan >= 0) scope_thread = std::thread(scope_main);
     for (const HPin &p : hpins)
-        if (p.out) say(false, "%s: NATS hal out %s (%s %s) <- %s\n", tag(), p.metric.c_str(), p.sig ? "signal" : "pin",
-                       p.src.c_str(), s_dcmd_hal.c_str());
+        if (p.out) say(false, "%s: NATS hal out %s (%s %s) <- %s%s\n", tag(), p.metric.c_str(), p.sig ? "signal" : "pin",
+                       p.src.c_str(), s_dcmd_hal.c_str(), p.has_safe ? ", safe= while the Primary Host is away" : "");
+    if (guard) say(false, "%s: NATS Primary Host %s: STATE spBv1//0.STATE.%s, silence %g s = offline\n",
+                   tag(), cfg.host.c_str(), cfg.host.c_str(), host_ttl_s);
     if (!own_cmds.empty()) say(false, "%s: NATS commands <- %s\n", tag(), own_cmds.c_str());
     say(false, "%s: NATS %s%s as Sparkplug node %s/%s, %zu own metrics, %zu hal, %zu scope columns, snapshot on %s\n",
         tag(), cfg.url.c_str(), cfg.user.empty() ? "" : " (user)", cfg.group.c_str(), cfg.node.c_str(),
