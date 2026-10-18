@@ -9,6 +9,8 @@
 *     connection from the environment (SYNCTWIN_NATS_URL/USER/PASS,
 *     SYNCTWIN_BOX_ID, NODE_ID), the INI [NATS] keys override; the pins file
 *     is the hal2spb conf line format. loadusr -W halnats -c ... or a unit.
+*     SIGHUP (or NCMD Node Control/Rebirth) re-reads the pins file: a HAL layer
+*     attached / detached on the fly gets its rows into DBIRTH of hal.
 *
 * License: GPL Version 2
 * Copyright (c) 2026 SyncTwin Technologies
@@ -24,6 +26,7 @@
 
 static volatile sig_atomic_t done = 0;
 static void on_sig(int) { done = 1; }
+static void on_hup(int) { halnats::rebirth(); }   // = NCMD Node Control/Rebirth: PINS re-read, births
 
 int main(int argc, char **argv)
 {
@@ -55,6 +58,11 @@ int main(int argc, char **argv)
     hal_ready(comp);
     signal(SIGINT, on_sig);
     signal(SIGTERM, on_sig);
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_hup;
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGHUP, &sa, nullptr);
     if (halnats::start(c, comp, nullptr)) { hal_exit(comp); return 1; }
     while (!done) pause();
     halnats::stop();

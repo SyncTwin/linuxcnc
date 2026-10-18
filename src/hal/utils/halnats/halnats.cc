@@ -134,6 +134,7 @@ std::vector<natsSubscription *> own_dcmd_subs;   // DCMD of the owner devices th
 std::vector<size_t> own_dcmd_dev;                // closure of each: the device index (stable storage)
 std::thread pub_thread, scope_thread;
 std::atomic<bool> running{false}, need_birth{false};
+std::atomic<bool> need_reload{false};           // Rebirth / SIGHUP: PINS re-read, resubscribed, births (publisher)
 bool enabled = false;
 bool born = false;                               // under mx: births of this connection sent
 int64_t bdseq = 0;
@@ -441,6 +442,7 @@ void on_dcmd(natsConnection *, natsSubscription *, natsMsg *msg, void *)
                                                (const uint8_t *)natsMsg_GetData(msg));
     natsMsg_Destroy(msg);
     if (!pl) { say(true, "%s: NATS DCMD hal refused: not a Sparkplug B payload\n", tag()); return; }
+    std::lock_guard<std::mutex> g(mx);           // the rows change on a Rebirth (reload, publisher thread)
     struct Cmd { const HPin *p; hal_query_value_u v; };
     std::vector<Cmd> cmds;
     const char *bad = nullptr; std::string who;
@@ -1096,7 +1098,7 @@ void on_ncmd(natsConnection *, natsSubscription *, natsMsg *msg, void *)
     if (!pl) { say(true, "%s: NATS NCMD refused: not a Sparkplug B payload\n", tag()); return; }
     for (size_t n = 0; n < pl->n_metrics; n++) {
         const Metric *m = pl->metrics[n];
-        if (m->name && !strcmp(m->name, "Node Control/Rebirth")) { if (m->boolean_value) need_birth = true; }
+        if (m->name && !strcmp(m->name, "Node Control/Rebirth")) { if (m->boolean_value) need_reload = true; }
         else say(true, "%s: NATS NCMD %s refused: the node takes Node Control/Rebirth; HAL commands are DCMD of device hal\n",
                  tag(), m->name ? m->name : "(alias)");
     }
@@ -1118,11 +1120,14 @@ void on_disconnected(natsConnection *, void *)
     born = false;                                // no DDATA of a dead session; births on reconnect
 }
 
+void reload();
+
 void publisher()
 {
     while (running) {
         {
             std::lock_guard<std::mutex> g(mx);
+            if (need_reload.exchange(false)) reload();
             if (own) own->pull();
             host_guard();
             tags_step();
@@ -1216,6 +1221,7 @@ void scope_main()
         double t_last = now.tv_sec + now.tv_nsec * 1e-9 - hal_stream_depth(&st) * dt;
         double t_first = t_last - (n - 1) * dt;
         uint64_t ts = (uint64_t)llround(t_first * 1000.0);
+        std::lock_guard<std::mutex> g(mx);       // scope_alias0 moves with the hal rows (Rebirth reload)
         Batch b;
         for (int c = 0; c < ncol; c++) {
             // report by exception: a column constant at its last sent value is not sent
@@ -1231,7 +1237,6 @@ void scope_main()
             m.bytes_value.data = (uint8_t *)x;
         }
         if (b.ms.empty()) continue;
-        std::lock_guard<std::mutex> g(mx);
         // off the broker or before this session's DBIRTH: dropped (the birth declares, data follows)
         if (born && natsConnection_Status(nc) == NATS_CONN_STATUS_CONNECTED) send(s_ddata[d_scope], b, true);
     }
@@ -1451,6 +1456,141 @@ std::string env(const char *var)
     return v ? v : "";
 }
 
+// ---- the PINS set: start and Rebirth (reload) ----
+
+// Everything load_pins fills. A Rebirth parses the file into empty globals and swaps the previous set back
+// when the new one is refused - the node never publishes half a file.
+struct PinsSet {
+    std::vector<HPin> hpins;
+    double keepalive_s = 0, hal_period_s = 0, host_ttl_s = 0, tag_ttl_s = 0;
+    int s_chan = -1, s_batch = 0;
+    long s_dt_ns = 0;
+    bool s_float = false;
+    std::vector<SCol> scols;
+    std::vector<TagEnd> tends;
+    std::map<std::string, std::string> tag_alive, tag_alive_of;
+    std::string tag_own_stand;
+    bool tag_ok_sig = false;
+    std::string tag_ok_src;
+};
+void swap_pins(PinsSet &p)                       // the globals <-> p, field by field
+{
+    p.hpins.swap(hpins); p.scols.swap(scols); p.tends.swap(tends);
+    p.tag_alive.swap(tag_alive); p.tag_alive_of.swap(tag_alive_of);
+    p.tag_own_stand.swap(tag_own_stand); p.tag_ok_src.swap(tag_ok_src);
+    std::swap(p.keepalive_s, keepalive_s); std::swap(p.hal_period_s, hal_period_s);
+    std::swap(p.host_ttl_s, host_ttl_s); std::swap(p.tag_ttl_s, tag_ttl_s);
+    std::swap(p.s_chan, s_chan); std::swap(p.s_batch, s_batch); std::swap(p.s_dt_ns, s_dt_ns);
+    std::swap(p.s_float, s_float); std::swap(p.tag_ok_sig, tag_ok_sig);
+}
+bool same_scope(const PinsSet &o)
+{
+    if (o.s_chan != s_chan || o.s_batch != s_batch || o.s_dt_ns != s_dt_ns || o.s_float != s_float
+        || o.scols.size() != scols.size()) return false;
+    for (size_t c = 0; c < scols.size(); c++)
+        if (o.scols[c].key != scols[c].key || o.scols[c].ch != scols[c].ch || o.scols[c].scale != scols[c].scale) return false;
+    return true;
+}
+
+// The loaded set against the node: scope needs a HAL component, safe= rows a Primary Host. Sets `guard`.
+// false = refused (said).
+bool pins_check()
+{
+    if (s_chan >= 0 && hal_comp < 0) {
+        say(true, "%s: NATS PINS scope_channel without a HAL component - publishing refused\n", tag());
+        return false;
+    }
+    size_t n_safe = 0;
+    for (const HPin &p : hpins) n_safe += p.has_safe;
+    if (n_safe && cfg.host.empty())
+        say(true, "%s: NATS PINS: %zu safe= outputs but no Primary Host id (SYNCTWIN_SPB_PRIMARY_HOST, INI [NATS] "
+            "PRIMARY_HOST) - they are NOT made safe when the host goes away\n", tag(), n_safe);
+    else if (n_safe && !(host_ttl_s > 0)) {
+        say(true, "%s: NATS PINS: safe= outputs without spb_host_ttl_s - publishing refused\n", tag());
+        return false;
+    }
+    bool g = n_safe && !cfg.host.empty() && cfg.host.find_first_of(".*> ") == std::string::npos;
+    if (n_safe && !cfg.host.empty() && !g) {
+        say(true, "%s: NATS Primary Host id '%s' is not a NATS token - publishing refused\n", tag(), cfg.host.c_str());
+        return false;
+    }
+    guard = g;
+    return true;
+}
+
+// Every subscription of the node on the current set. Called at start and on every Rebirth: a fresh SUB is
+// judged by the broker's permissions of NOW (a SUB denied before a permission change stays dead in libnats).
+natsStatus subscribe_all()
+{
+    natsStatus st = natsConnection_Subscribe(&snap_sub, nc, s_snapshot.c_str(), on_snapshot, nullptr);
+    if (st == NATS_OK) st = natsConnection_Subscribe(&ncmd_sub, nc, s_ncmd.c_str(), on_ncmd, nullptr);
+    bool has_out = false;
+    for (const HPin &p : hpins) has_out = has_out || p.out;
+    if (st == NATS_OK && has_out) st = natsConnection_Subscribe(&dcmd_sub, nc, s_dcmd_hal.c_str(), on_dcmd, nullptr);
+    // tags: watch the republish of every liveness key and reader key (libnats resubscribes on reconnect)
+    std::set<std::string> watch;
+    for (const auto &a : tag_alive_of) watch.insert(a.first);
+    for (const TagEnd &t : tends) if (t.out) watch.insert(t.key);
+    for (const std::string &k : watch) {
+        if (st != NATS_OK) break;
+        tag_subs.push_back(nullptr);
+        st = natsConnection_Subscribe(&tag_subs.back(), nc, ("kv.CELL." + k).c_str(), on_tag_msg, nullptr);
+    }
+    if (st == NATS_OK && guard)
+        st = natsConnection_Subscribe(&state_sub, nc, ("spBv1//0.STATE." + cfg.host).c_str(), on_state, nullptr);
+    if (own) {
+        own_dcmd_subs.assign(own_dcmd_dev.size(), nullptr);
+        for (size_t k = 0; k < own_dcmd_dev.size() && st == NATS_OK; k++) {
+            std::string subj = "spBv1//0." + cfg.group + ".DCMD." + cfg.node + "." + own->devices()[own_dcmd_dev[k]];
+            st = natsConnection_Subscribe(&own_dcmd_subs[k], nc, subj.c_str(), on_own_dcmd, &own_dcmd_dev[k]);
+        }
+    }
+    return st;
+}
+
+// Sparkplug B 3.0 Node Control/Rebirth (and SIGHUP of halnats): the node's definition is the PINS file, so a
+// Rebirth re-reads it - a guest attached / detached on the fly gets its rows into NBIRTH + DBIRTH (same bdSeq,
+// spec 6.4.x: a Rebirth is births, not a new session), the rows of a removed one are gone. A refused file
+// keeps the previous set (said). Subscriptions are made again in both cases. Publisher thread, under mx.
+void reload()
+{
+    PinsSet old;
+    swap_pins(old);                              // globals empty, `old` = the set published until now
+    bool guard0 = guard;
+    std::string why;
+    if (!cfg.pins.empty() && !load_pins(cfg.pins)) why = "the file refused (above)";
+    else if (!same_scope(old)) why = "scope rows changed - the scope thread holds its FIFO; a new session takes them";
+    else if (!pins_check()) why = "refused (above)";
+    if (!why.empty()) {
+        swap_pins(old);                          // the previous set back; the refused one dropped with `old`
+        guard = guard0;
+        say(true, "%s: NATS Rebirth: PINS %s not taken: %s - the previous set stays\n", tag(), cfg.pins.c_str(), why.c_str());
+    }
+    bool conn = natsConnection_Status(nc) == NATS_CONN_STATUS_CONNECTED;
+    // the node's own stand leaves the tags: say it dead now, not after the readers' TTL
+    if (why.empty() && conn && tlink && !old.tag_own_stand.empty() && old.tag_own_stand != tag_own_stand)
+        kv_put(old.tag_alive[old.tag_own_stand], tag_pack_alive(old.tag_own_stand, false, now_unix(), tag_next_seq()));
+    destroy_subs();
+    natsStatus st = subscribe_all();
+    if (st != NATS_OK)
+        say(true, "%s: NATS Rebirth: subscribe: %s - the next Rebirth tries again\n", tag(), natsStatus_GetText(st));
+    scope_alias0 = hal_alias0 + hpins.size();
+    hal_born = false;
+    held_safe = false;                           // host_guard judges again: new safe= rows written safe if the host is away
+    rested.clear();                              // tag_expire rests every reader end of a dead stand again (new ends too)
+    rejected.clear();
+    tag_ok_last = -1;
+    if (tends.empty()) tlink = false;
+    else if (conn && tlink) {
+        // the link stays up (tag_ok does not blink): read current over the resubscribe gap, BIRTH the writers again
+        if (!tag_birth()) { tlink = false; tag_start = true; }
+    } else tag_start = true;
+    need_birth = true;
+    if (why.empty())
+        say(false, "%s: NATS Rebirth: PINS %s re-read - %zu hal (was %zu), %zu tags (was %zu); births follow\n",
+            tag(), cfg.pins.c_str(), hpins.size(), old.hpins.size(), tends.size(), old.tends.size());
+}
+
 } // namespace
 
 int configure(Config &c, const char *inifile, const char *node_suffix, double default_period)
@@ -1498,10 +1638,6 @@ int start(const Config &c, int hal_comp_id, Owner *owner)
     cfg = c;
     own = owner;
     if (!cfg.pins.empty() && !load_pins(cfg.pins)) return -1;
-    if (s_chan >= 0 && hal_comp_id < 0) {
-        say(true, "%s: NATS PINS scope_channel without a HAL component - publishing refused\n", tag());
-        return -1;
-    }
     hal_comp = hal_comp_id;
     // publisher period: INI [NATS] PUBLISH_PERIOD / the owner's default, else the PINS file's hz
     if (!(cfg.period_s > 0)) cfg.period_s = hal_period_s;
@@ -1509,20 +1645,7 @@ int start(const Config &c, int hal_comp_id, Owner *owner)
         say(true, "%s: NATS: no publisher period - INI [NATS] PUBLISH_PERIOD or PINS hz - publishing refused\n", tag());
         return -1;
     }
-    size_t n_safe = 0;
-    for (const HPin &p : hpins) n_safe += p.has_safe;
-    if (n_safe && cfg.host.empty())
-        say(true, "%s: NATS PINS: %zu safe= outputs but no Primary Host id (SYNCTWIN_SPB_PRIMARY_HOST, INI [NATS] "
-            "PRIMARY_HOST) - they are NOT made safe when the host goes away\n", tag(), n_safe);
-    else if (n_safe && !(host_ttl_s > 0)) {
-        say(true, "%s: NATS PINS: safe= outputs without spb_host_ttl_s - publishing refused\n", tag());
-        return -1;
-    }
-    guard = n_safe && !cfg.host.empty() && cfg.host.find_first_of(".*> ") == std::string::npos;
-    if (n_safe && !cfg.host.empty() && !guard) {
-        say(true, "%s: NATS Primary Host id '%s' is not a NATS token - publishing refused\n", tag(), cfg.host.c_str());
-        return -1;
-    }
+    if (!pins_check()) return -1;
     hal_alias0 = (own ? own->aliases() : 0) + 1;
     scope_alias0 = hal_alias0 + hpins.size();
 
@@ -1557,36 +1680,17 @@ int start(const Config &c, int hal_comp_id, Owner *owner)
         st = natsConnection_Connect(&nc, opts);
         if (st == NATS_NOT_YET_CONNECTED) st = NATS_OK;
     }
-    if (st == NATS_OK) st = natsConnection_Subscribe(&snap_sub, nc, s_snapshot.c_str(), on_snapshot, nullptr);
-    if (st == NATS_OK) st = natsConnection_Subscribe(&ncmd_sub, nc, s_ncmd.c_str(), on_ncmd, nullptr);
-    bool has_out = false;
-    for (const HPin &p : hpins) has_out = has_out || p.out;
-    if (st == NATS_OK && has_out) st = natsConnection_Subscribe(&dcmd_sub, nc, s_dcmd_hal.c_str(), on_dcmd, nullptr);
-    // tags: watch the republish of every liveness key and reader key (libnats resubscribes on reconnect)
     tag_seq = (int64_t)(now_unix() * 1e6);       // tag_envelope.Sequence: a restarted writer is newer
-    {
-        std::set<std::string> watch;
-        for (const auto &a : tag_alive_of) watch.insert(a.first);
-        for (const TagEnd &t : tends) if (t.out) watch.insert(t.key);
-        for (const std::string &k : watch) {
-            if (st != NATS_OK) break;
-            tag_subs.push_back(nullptr);
-            st = natsConnection_Subscribe(&tag_subs.back(), nc, ("kv.CELL." + k).c_str(), on_tag_msg, nullptr);
-        }
-    }
-    if (st == NATS_OK && guard)
-        st = natsConnection_Subscribe(&state_sub, nc, ("spBv1//0.STATE." + cfg.host).c_str(), on_state, nullptr);
     std::string own_cmds;
     if (own) {
         own_dcmd_dev.clear();
-        for (size_t d = 0; d < own->devices().size(); d++) if (own->takes_commands(d)) own_dcmd_dev.push_back(d);
-        own_dcmd_subs.assign(own_dcmd_dev.size(), nullptr);
-        for (size_t k = 0; k < own_dcmd_dev.size() && st == NATS_OK; k++) {
-            std::string subj = base + "DCMD." + cfg.node + "." + own->devices()[own_dcmd_dev[k]];
-            st = natsConnection_Subscribe(&own_dcmd_subs[k], nc, subj.c_str(), on_own_dcmd, &own_dcmd_dev[k]);
-            own_cmds += (own_cmds.empty() ? "" : ", ") + subj;
-        }
+        for (size_t d = 0; d < own->devices().size(); d++)
+            if (own->takes_commands(d)) {
+                own_dcmd_dev.push_back(d);
+                own_cmds += (own_cmds.empty() ? "" : ", ") + base + "DCMD." + cfg.node + "." + own->devices()[d];
+            }
     }
+    if (st == NATS_OK) st = subscribe_all();
     natsOptions_Destroy(opts);
     if (st != NATS_OK) {
         say(true, "%s: NATS %s: %s - publishing refused\n", tag(), cfg.url.c_str(), natsStatus_GetText(st));
@@ -1616,6 +1720,8 @@ int start(const Config &c, int hal_comp_id, Owner *owner)
         own ? own->aliases() : (size_t)0, hpins.size(), scols.size(), s_snapshot.c_str());
     return 0;
 }
+
+void rebirth() { need_reload = true; }       // a lock-free atomic store: async-signal-safe
 
 void stop()
 {
