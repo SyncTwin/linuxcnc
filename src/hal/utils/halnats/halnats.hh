@@ -10,7 +10,7 @@
 *   component iocontrol.0 present) - there the task publishes.
 *
 *   The node owns: the NATS connection (background connect, endless reconnect),
-*   NBIRTH / NDEATH (bdSeq), NCMD "Node Control/Rebirth", the request-reply
+*   NBIRTH / NDEATH (bdSeq), NCMD "Node Control/Rebirth" (re-reads PINS, resubscribes, births), the request-reply
 *   snapshot lcnc.<group>.<node>.snapshot, and the devices of the PINS file:
 *     <owner devices> DCMD to the owner (Owner::takes_commands / command)
 *     hal    pins / signals read by name through the HAL query API, DDATA past
@@ -97,6 +97,10 @@ int configure(Config &c, const char *inifile, const char *node_suffix, double de
 // owner: nullptr = devices hal and scope only.
 int start(const Config &c, int hal_comp, Owner *owner);
 void stop();                                     // NDEATH, threads joined, connection closed
+// Node Control/Rebirth from inside the process (halnats: SIGHUP), the same as the NCMD: the PINS file
+// re-read (a refused file keeps the previous set), every subscription made again, NBIRTH + DBIRTHs with
+// the same bdSeq - in the publisher thread within one period. Async-signal-safe.
+void rebirth();
 
 void say(bool error, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
