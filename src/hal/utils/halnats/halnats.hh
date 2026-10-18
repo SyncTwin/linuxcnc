@@ -76,6 +76,7 @@ typedef void (*LogFn)(bool error, const char *line);
 
 struct Config {
     std::string url, user, pass, group, node;
+    std::string host;                            // Sparkplug Primary Host id (STATE.<host>); empty = no guard
     std::string pins;                            // PINS file, absolute; empty = no hal/scope devices
     double period_s = 0;                         // publisher period
     std::string tag;                             // log prefix: "task", "halnats"
@@ -84,8 +85,8 @@ struct Config {
 
 // Connection keys from the VM environment (the agent's node-agent.env, as appliance/hal2spb):
 //   SYNCTWIN_NATS_URL, SYNCTWIN_NATS_USER, SYNCTWIN_NATS_PASS, SYNCTWIN_BOX_ID -> group,
-//   NODE_ID + node_suffix -> node;
-// the INI [NATS] URL USER PASS GROUP NODE PINS PUBLISH_PERIOD override them (inifile may be
+//   NODE_ID + node_suffix -> node, SYNCTWIN_SPB_PRIMARY_HOST -> host;
+// the INI [NATS] URL USER PASS GROUP NODE PRIMARY_HOST PINS PUBLISH_PERIOD override them (inifile may be
 // nullptr). PINS relative to the INI's folder. period_s: PUBLISH_PERIOD, else default_period,
 // else (<= 0) the PINS file's hz (start refuses when none gives it).
 // 1 = off (no URL anywhere, said once), 0 = configured, -1 = refused (said).

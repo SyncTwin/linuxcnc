@@ -14,8 +14,8 @@
 *   devices, or a device name), metrics "<device>/<metric>".
 *   Strings (task/file, task/command) go out as Sparkplug String.
 *
-*   Node = NODE_ID + "-task" while hal2spb publishes NODE_ID next to it (the
-*   a3 comparison); INI [NATS] NODE overrides.
+*   Node = NODE_ID - the ONE Sparkplug node of the VM (hal2spb is gone, owner
+*   18.10); INI [NATS] NODE overrides.
 *
 * License: GPL Version 2
 * Copyright (c) 2026 SyncTwin Technologies
@@ -700,7 +700,7 @@ int taskNatsInit(const char *inifile, int joints, double task_cycle_time, int ha
     c.tag = "task";
     c.log = log_line;
     // the publisher's period: [NATS] PUBLISH_PERIOD, else the task cycle (one publish per task cycle at most)
-    int r = halnats::configure(c, inifile, "-task", task_cycle_time);
+    int r = halnats::configure(c, inifile, "", task_cycle_time);
     if (r > 0) {
         rcs_print_error("task: no NATS URL ([NATS] URL or SYNCTWIN_NATS_URL) - NATS is the only command "
                         "source and status sink (no NML), the task cannot run without it\n");
