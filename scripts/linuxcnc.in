@@ -154,6 +154,11 @@ Options:
                   $HALLIB_DIR
 Note:
     The -H "dirname" option may be specified multiple times
+
+Environment:
+    LINUXCNC_BASE_HAL=1: realtime and HAL are held by a base session.
+    Do not start or stop realtime; on exit unload only the components and
+    delete only the signals this LinuxCNC added, leave the threads running.
 EOF
 
 }
@@ -606,6 +611,55 @@ function KillTaskWithTimeout() {
 
 
 ################################################################################
+# 3.1.1. LINUXCNC_BASE_HAL: realtime and HAL are held by a base session that
+# outlives this LinuxCNC. Start records what HAL holds before this session
+# loads anything; cleanup unloads only the components and deletes only the
+# signals that were added since. Without LINUXCNC_BASE_HAL nothing changes.
+################################################################################
+BASE_SNAPSHOT=/tmp/linuxcnc.base-hal
+
+function HalNames() { # $1 = comp|sig; the halcmd processes are not HAL state
+    # shellcheck disable=SC2086
+    $HALCMD list "$1" | tr -s ' \t' '\n' | $GREP -v -e '^$' -e '^halcmd'
+}
+
+function SnapshotBase() {
+    { HalNames comp | sed 's/^/comp /'; HalNames sig | sed 's/^/sig /'; } > "$BASE_SNAPSHOT"
+}
+
+function OwnNames() { # $1 = comp|sig: present now, absent from the snapshot
+    HalNames "$1" | $GREP -vxF -f <(sed -n "s/^$1 //p" "$BASE_SNAPSHOT")
+}
+
+function UnloadOwn() {
+    if [ ! -f "$BASE_SNAPSHOT" ]; then
+        echo "No base HAL snapshot, nothing of this session to unload" >> "$PRINT_FILE"
+        return 0
+    fi
+    local OWN
+    OWN=$(OwnNames comp)
+    echo "Unloading this session's hal components:" $OWN >> "$DEBUG_FILE"
+    # motmod first: it uses the tp and homing modules
+    if echo "$OWN" | $GREP -qx motmod; then
+        $HALCMD unload motmod
+    fi
+    for c in $OWN; do
+        [ "$c" = motmod ] || $HALCMD unload "$c"
+    done
+    # Unused variable 'i', just a counter
+    # shellcheck disable=SC2034
+    for i in $(seq 10); do
+        # userspace components exit on SIGTERM asynchronously
+        if [ -z "$(OwnNames comp)" ]; then break; fi
+        sleep .2
+    done
+    for s in $(OwnNames sig); do
+        $HALCMD delsig "$s"
+    done
+    rm -f "$BASE_SNAPSHOT"
+}
+
+################################################################################
 # 3.2. define the cleanup function
 #
 # this cleanup function doesn't know or care what was actually
@@ -643,6 +697,16 @@ function Cleanup() {
 	    KillTaskWithTimeout
 	fi
     done
+
+    if [ -n "$LINUXCNC_BASE_HAL" ]; then
+        # The base HAL session owns realtime, its threads and its components:
+        # unload only what this session added on top of it, leave the threads running.
+        UnloadOwn
+        if [ -f "$LOCKFILE" ] ; then
+            rm "$LOCKFILE"
+        fi
+        return 0
+    fi
 
     echo "Stopping realtime threads" >> "$DEBUG_FILE"
     $HALCMD stop
@@ -726,8 +790,16 @@ touch "$LOCKFILE"
 INI_FILE_NAME="$INIFILE"; export INI_FILE_NAME
 
 # 4.3.2. Start REALTIME
-echo "Loading Real Time OS, RTAPI, and HAL_LIB modules" >> "$PRINT_FILE"
-if ! $REALTIME start ; then
+if [ -n "$LINUXCNC_BASE_HAL" ]; then
+    # realtime is the base session's; this session neither starts nor stops it
+    if ! $REALTIME status >> "$DEBUG_FILE" ; then
+        echo "LINUXCNC_BASE_HAL is set but realtime is not running: no base HAL session"
+        rm -f "$LOCKFILE"
+        exit 1
+    fi
+    SnapshotBase
+    echo "Base HAL session held, $(wc -l < "$BASE_SNAPSHOT") entries kept" >> "$PRINT_FILE"
+elif ! $REALTIME start ; then
     echo "Realtime system did not load"
     Cleanup
     exit 1
