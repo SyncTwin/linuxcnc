@@ -4921,6 +4921,7 @@ EXPORT_SYMBOL(hal_export_funct);
 EXPORT_SYMBOL(hal_export_functf);
 
 EXPORT_SYMBOL(hal_create_thread);
+EXPORT_SYMBOL(hal_thread_delete);
 
 EXPORT_SYMBOL(hal_add_funct_to_thread);
 EXPORT_SYMBOL(hal_init_funct_to_thread);

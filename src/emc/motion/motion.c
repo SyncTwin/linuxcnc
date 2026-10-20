@@ -13,6 +13,7 @@
 #include <rtapi.h>		/* RTAPI realtime OS API */
 #include <rtapi_app.h>		/* RTAPI realtime module decls */
 #include <rtapi_string.h>       /* memset */
+#include <rtapi_errno.h>        /* EEXIST */
 #include <rtapi_math.h>
 #include <hal.h>		/* decls for HAL implementation */
 
@@ -84,6 +85,17 @@ RTAPI_MP_ARRAY_STRING(names_misc_errors, EMCMOT_MAX_MISC_ERROR, "names of errors
 
 static int unlock_joints_mask = 0;/* mask to select joints for unlock pins */
 RTAPI_MP_INT(unlock_joints_mask, "mask to select joints for unlock pins");
+/* Use base-thread/servo-thread when they already exist (created by an
+   earlier HAL layer that outlives motmod) instead of failing on the
+   duplicate name. Threads motmod did not create are neither stopped nor
+   deleted when motmod is unloaded. Default 0: motmod creates its threads
+   and stops all threads on unload, as before. */
+static int use_existing_threads = 0;
+RTAPI_MP_INT(use_existing_threads, "use existing base/servo threads, leave them running on unload");
+/* threads created by this module (deleted on unload when threads are shared) */
+static int own_base_thread = 0;
+static int own_servo_thread = 0;
+static int period_mismatch_reported = 0;
 /***********************************************************************
 *                  GLOBAL VARIABLE DEFINITIONS                         *
 ************************************************************************/
@@ -469,10 +481,25 @@ void rtapi_app_exit(void)
 
     rtapi_print_msg(RTAPI_MSG_INFO, "MOTION: cleanup_module() started.\n");
 
-    retval = hal_stop_threads();
-    if (retval < 0) {
-	rtapi_print_msg(RTAPI_MSG_ERR,
-	    _("MOTION: hal_stop_threads() failed, returned %d\n"), retval);
+    if (own_servo_thread) {
+	retval = hal_stop_threads();
+	if (retval < 0) {
+	    rtapi_print_msg(RTAPI_MSG_ERR,
+		_("MOTION: hal_stop_threads() failed, returned %d\n"), retval);
+	}
+    } else {
+	/* servo-thread belongs to another layer and keeps running.
+	   unloadrt has already delf'd motmod's functions and waited for
+	   the threads to leave them; only threads this module created are
+	   deleted. */
+	if (own_base_thread) {
+	    retval = hal_thread_delete("base-thread");
+	    if (retval < 0) {
+		rtapi_print_msg(RTAPI_MSG_ERR,
+		    _("MOTION: hal_thread_delete(base-thread) failed, returned %d\n"),
+		    retval);
+	    }
+	}
     }
     /* free the S-curve planner + Ruckig pool (threads are stopped, safe) */
     sp_scurve_cleanup();
@@ -996,6 +1023,45 @@ static int init_comm_buffers(void)
 /* init_threads() creates realtime threads, exports functions to
    do the realtime control, and adds the functions to the threads.
 */
+/* Create a HAL thread, or with use_existing_threads take the one that is
+   already there. *own is set when this module created the thread. */
+static int create_or_use_thread(const char *name, long period_nsec, int *own)
+{
+    int retval;
+
+    *own = 0;
+    retval = hal_create_thread(name, period_nsec);
+    if (retval >= 0) {
+	*own = 1;
+	return 0;
+    }
+    if (retval == -EEXIST && use_existing_threads) {
+	rtapi_print_msg(RTAPI_MSG_INFO,
+	    "MOTION: using existing thread '%s'\n", name);
+	return 0;
+    }
+    return retval;
+}
+
+/* motion-controller on a servo-thread this module did not create: its
+   period is not known at load time, so it is checked on every call.
+   A thread with another period than servo_period_nsec would make motion
+   run on wrong cycle times; motion does not run and says why, once. */
+static void emcmotControllerShared(void *arg, long period)
+{
+    if (period != servo_period_nsec) {
+	if (!period_mismatch_reported) {
+	    rtapi_print_msg(RTAPI_MSG_ERR,
+		"MOTION: existing servo-thread period %ld nsec differs from"
+		" servo_period_nsec %ld nsec, motion is not running\n",
+		period, servo_period_nsec);
+	    period_mismatch_reported = 1;
+	}
+	return;
+    }
+    emcmotController(arg, period);
+}
+
 static int init_threads(void)
 {
     double base_period_sec, servo_period_sec;
@@ -1027,7 +1093,8 @@ static int init_threads(void)
     /* create HAL threads for each period */
     /* only create base thread if it is faster than servo thread */
     if (servo_base_ratio > 1) {
-	retval = hal_create_thread("base-thread", base_period_nsec);
+	retval = create_or_use_thread("base-thread", base_period_nsec,
+				      &own_base_thread);
 	if (retval < 0) {
 	    rtapi_print_msg(RTAPI_MSG_ERR,
 		"MOTION: failed to create %ld nsec base thread\n",
@@ -1035,7 +1102,8 @@ static int init_threads(void)
 	    return -1;
 	}
     }
-    retval = hal_create_thread("servo-thread", servo_period_nsec);
+    retval = create_or_use_thread("servo-thread", servo_period_nsec,
+				  &own_servo_thread);
     if (retval < 0) {
 	rtapi_print_msg(RTAPI_MSG_ERR,
 	    "MOTION: failed to create %ld nsec servo thread\n",
@@ -1043,7 +1111,8 @@ static int init_threads(void)
 	return -1;
     }
     /* export realtime functions that do the real work */
-    retval = hal_export_funct("motion-controller", emcmotController, 0	/* arg
+    retval = hal_export_funct("motion-controller",
+	(own_servo_thread ? emcmotController : emcmotControllerShared), 0	/* arg
 	 */ , 0 /* reentrant */ , mot_comp_id);
     if (retval < 0) {
 	rtapi_print_msg(RTAPI_MSG_ERR,
