@@ -5,7 +5,7 @@
 *     milltask (emc/task/tasknats.cc) - a VM running LinuxCNC: adds its status
 *       devices task/motion/io/config/interp as an Owner;
 *     halnats (halnats_main.cc)       - a VM with HAL and no LinuxCNC (automation
-*       nodes: HAL + soft-PLC): devices hal and scope only.
+*       nodes: HAL + soft-PLC): devices hal, sampler and scope only.
 *   One publisher per VM: halnats refuses to run next to a LinuxCNC task (HAL
 *   component iocontrol.0 present) - there the task publishes.
 *
@@ -15,7 +15,8 @@
 *     <owner devices> DCMD to the owner (Owner::takes_commands / command)
 *     hal    pins / signals read by name through the HAL query API, DDATA past
 *            quantum/deadband, empty DDATA keepalive, DCMD writes dir=out entries
-*     scope  the sampler FIFO, DDATA batches of Double/FloatArray columns
+*     sampler  the sampler FIFO of a guest, DDATA batches of Double/FloatArray columns (guest units)
+*     scope    the lcec process image ring, raw PDO entries of every slave, always on (no node needed)
 *   (the PINS line format is the one of appliance/hal2spb's conf - see halnats.cc).
 *
 *   Subjects are the NATS spelling of the Sparkplug MQTT topics
@@ -77,7 +78,7 @@ typedef void (*LogFn)(bool error, const char *line);
 struct Config {
     std::string url, user, pass, group, node;
     std::string host;                            // Sparkplug Primary Host id (STATE.<host>); empty = no guard
-    std::string pins;                            // PINS file, absolute; empty = no hal/scope devices
+    std::string pins;                            // PINS file, absolute; empty = no hal/sampler/scope devices
     double period_s = 0;                         // publisher period
     std::string tag;                             // log prefix: "task", "halnats"
     LogFn log = nullptr;                         // nullptr = stderr
@@ -94,7 +95,7 @@ int configure(Config &c, const char *inifile, const char *node_suffix, double de
 
 // 0 = publishing (connect goes on in the background); -1 = refused (said).
 // hal_comp: a HAL component of the process (the sampler FIFO is attached with it).
-// owner: nullptr = devices hal and scope only.
+// owner: nullptr = devices hal, sampler and scope only.
 int start(const Config &c, int hal_comp, Owner *owner);
 void stop();                                     // NDEATH, threads joined, connection closed
 // Node Control/Rebirth from inside the process (halnats: SIGHUP), the same as the NCMD: the PINS file
