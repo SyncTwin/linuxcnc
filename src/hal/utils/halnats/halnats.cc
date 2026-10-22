@@ -29,6 +29,20 @@
 *            attach dropped, then batches of scope_batch rows as one DDATA of
 *            DoubleArray/FloatArray columns (packed LE) stamped with the first row's time; a
 *            column constant at its last sent value is left out (report by exception).
+*     scope_image <master> <divider> | scope_img <Key.chan> <slave> <index>:<subindex> s|u | scope_img <Key.chan> seq
+*            Device scope from the lcec process image ring instead of a sampler FIFO (no LinuxCNC, no
+*            sampler, no node needed): the SysV segment of lcec (layout: lcec_image.h of the lcec fork, its
+*            one home), master <master> of the XML, every <divider>-th master cycle a row (the grid of the
+*            master sequence: seq % divider == 0), scope_batch rows a DDATA, dt_ns = period x divider. A
+*            column is one PDO entry of a slave (XML name, index:subindex), its raw value as the bus carries
+*            it (s|u: two's complement or not; units are the reader's - the profile's), or `seq` - the
+*            master cycle sequence of the row. History is not sent: reading starts at the ring's head.
+*            A sequence the reader lost (lapped by the writer) ends the batch - a batch is always gapless.
+*            The writer gone (state not ARMED/RUNNING, a new segment for the key) - re-attached, the
+*            catalog read again. DCMD spBv1//0.<group>.DCMD.<node>.scope (only with scope_image):
+*            `divider` Int (>= 1) and/or `columns` String (comma list of <Key>/<chan> of the rows; "" = all),
+*            checked whole before it applies; the scope DBIRTH follows with the new dt_ns and the columns
+*            in force (a column off is not declared). Exclusive with scope_channel / scope_col.
 *     tag <key> bit|s32|u32|s64|float dir=in|out src=<pin> | sig=<signal> writer=<equipment> stand=<stand>
 *         alive=<liveness key> [strobe=1] [safe=<v>]
 *            A cell tag in KV bucket CELL - node to node, no Sparkplug (the pipe of the removed agent
@@ -72,11 +86,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
 
 #include <inifile.hh>
 #include <nats/nats.h>
 #include "hal.h"
 #include "../../components/streamer.h"   // SAMPLER_SHMEM_KEY - sampler.c's FIFO key
+// The process image ring of lcec: its one home is the lcec fork (src/lcec_image.h); configure
+// --with-lcec-image-h=FILE names it (as --with-sparkplug-proto names the Sparkplug schema) - never a copy here.
+#include LCEC_IMAGE_H
 
 using linuxcnc::IniFile;
 
@@ -126,6 +145,18 @@ std::vector<SCol> scols;
 std::vector<double> s_last;                      // under mx: the last value read of each scope column
 uint64_t s_last_ts = 0;                          // under mx: ms of that row; 0 = nothing read yet
 int hal_comp = -1;
+// device scope from the lcec process image ring (scope_image): the rows are parallel to scols
+struct SImg { std::string slave; unsigned idx = 0, sub = 0; bool sgn = false, seq = false; };
+std::string s_img_master;                        // scope_image <master>; empty = no ring source
+int s_img_div = 0;                               // scope_image <divider> of the file
+std::vector<SImg> simgs;
+std::vector<char> s_on;                          // under mx: column in force (DCMD scope `columns`)
+std::atomic<int> s_div{1};                       // the divider in force (DCMD scope `divider`)
+long s_img_dt_ns = 0;                            // under mx: period x divider in force; 0 = ring not attached yet
+std::atomic<bool> scope_reborn{false};           // the scope DBIRTH again (dt_ns / columns changed)
+natsSubscription *dcmd_scope_sub = nullptr;
+std::string s_dcmd_scope;
+bool scope_on() { return s_chan >= 0 || !s_img_master.empty(); }
 
 uint64_t hal_alias0 = 0, scope_alias0 = 0;      // after the owner's 1..N
 
@@ -321,12 +352,13 @@ void scope_birth()
 {
     Batch b;
     Metric &m = b.add("dt_ns", scope_alias0, HN_DT(Int64), 0);
-    m.value_case = HN_V(LONG_VALUE); m.long_value = (uint64_t)s_dt_ns;
+    m.value_case = HN_V(LONG_VALUE); m.long_value = (uint64_t)(s_img_master.empty() ? s_dt_ns : s_img_dt_ns);
     // Sparkplug B: the birth carries the current value of every metric - a one-element array of the last
     // row read (report by exception skips a column standing at it); nothing read yet - declared, empty
     std::vector<double> d(scols.size());
     std::vector<float> f(scols.size());
     for (size_t c = 0; c < scols.size(); c++) {
+        if (c < s_on.size() && !s_on[c]) continue;   // off by DCMD scope `columns`: not declared
         bool have = s_last_ts && c < s_last.size();
         Metric &mc = b.add(scols[c].key + "/" + scols[c].ch, scope_alias0 + 1 + c,
                            s_float ? HN_DT(FloatArray) : HN_DT(DoubleArray), have ? s_last_ts : 0);
@@ -370,7 +402,7 @@ void births()
     born = true;
     hal_born = false;
     if (!hpins.empty() && hal_all_ok()) hal_birth();   // else when every source reads (publisher)
-    if (s_chan >= 0) scope_birth();
+    if (scope_on()) scope_birth();
 }
 
 void on_snapshot(natsConnection *, natsSubscription *, natsMsg *msg, void *)
@@ -1076,6 +1108,55 @@ void tags_step()
     }
 }
 
+// DCMD .../scope (scope_image only): `divider` Int >= 1, `columns` String - comma list of <Key>/<chan> of the
+// scope_img rows, "" = all. Checked whole before it applies; the scope DBIRTH follows (publisher thread).
+void on_dcmd_scope(natsConnection *, natsSubscription *, natsMsg *msg, void *)
+{
+    Payload *pl = sparkplug_b__payload__unpack(nullptr, (size_t)natsMsg_GetDataLength(msg),
+                                               (const uint8_t *)natsMsg_GetData(msg));
+    natsMsg_Destroy(msg);
+    if (!pl) { say(true, "%s: NATS DCMD scope refused: not a Sparkplug B payload\n", tag()); return; }
+    int div = 0;
+    bool set_cols = false;
+    std::string cols, bad;
+    for (size_t k = 0; k < pl->n_metrics && bad.empty(); k++) {
+        const Metric *m = pl->metrics[k];
+        std::string name = m->name ? m->name : "";
+        if (name == "divider") {
+            int64_t v = m->value_case == HN_V(INT_VALUE) ? (int64_t)(int32_t)m->int_value
+                      : m->value_case == HN_V(LONG_VALUE) ? (int64_t)m->long_value : 0;
+            // ПРЕДПОЛОЖЕНИЕ, не замер: 1 000 000 master cycles a row is past any scope use (1 ms cycle: 1000 s)
+            if (v < 1 || v > 1000000) bad = "divider: an integer 1..1000000";
+            else div = (int)v;
+        } else if (name == "columns") {
+            if (m->value_case != HN_V(STRING_VALUE)) bad = "columns: a String";
+            else { cols = m->string_value ? m->string_value : ""; set_cols = true; }
+        } else bad = "'" + name + "' - the scope takes divider and columns";
+    }
+    sparkplug_b__payload__free_unpacked(pl, nullptr);
+    std::lock_guard<std::mutex> g(mx);
+    std::vector<char> on(scols.size(), cols.empty() ? 1 : 0);
+    if (bad.empty() && set_cols && !cols.empty()) {
+        size_t a = 0;
+        while (bad.empty() && a <= cols.size()) {
+            size_t e = cols.find(',', a);
+            std::string c = cols.substr(a, e == std::string::npos ? std::string::npos : e - a);
+            a = e == std::string::npos ? cols.size() + 1 : e + 1;
+            size_t k = 0;
+            while (k < scols.size() && scols[k].key + "/" + scols[k].ch != c) k++;
+            if (k == scols.size()) bad = "columns: '" + c + "' is no scope_img row";
+            else on[k] = 1;
+        }
+    }
+    if (!bad.empty()) { say(true, "%s: NATS DCMD scope refused: %s\n", tag(), bad.c_str()); return; }
+    // a new divider: the image thread sends the rows of the old grid, then the birth with the new dt_ns
+    if (div) s_div = div;
+    if (set_cols) { s_on = on; scope_reborn = true; }
+    size_t n_on = 0;
+    for (char c : s_on) n_on += c != 0;
+    say(false, "%s: NATS DCMD scope: divider %d, %zu of %zu columns\n", tag(), s_div.load(), n_on, scols.size());
+}
+
 // DCMD of an owner device: handed to the owner as is (it checks and queues; never under mx)
 void on_own_dcmd(natsConnection *, natsSubscription *, natsMsg *msg, void *closure)
 {
@@ -1093,6 +1174,7 @@ void destroy_subs()
     natsSubscription_Destroy(snap_sub); snap_sub = nullptr;
     natsSubscription_Destroy(ncmd_sub); ncmd_sub = nullptr;
     natsSubscription_Destroy(dcmd_sub); dcmd_sub = nullptr;
+    natsSubscription_Destroy(dcmd_scope_sub); dcmd_scope_sub = nullptr;
     natsSubscription_Destroy(state_sub); state_sub = nullptr;
     for (natsSubscription *&s : tag_subs) { natsSubscription_Destroy(s); s = nullptr; }
     tag_subs.clear();
@@ -1152,6 +1234,7 @@ void publisher()
                             own->data(d, b);
                             if (!b.ms.empty()) send(s_ddata[d], b, true);
                         }
+                    if (scope_reborn.exchange(false)) scope_birth();
                     if (errw.total() != errs_sent) {     // NDATA by exception: only when the count moved
                         Batch b;
                         std::string le;
@@ -1169,6 +1252,33 @@ void publisher()
         struct timespec p = {(time_t)p_s, (long)((p_s - (time_t)p_s) * 1e9)};
         nanosleep(&p, nullptr);
     }
+}
+
+// One batch of n rows (column-major, batch rows per column) -> DDATA of device scope. Under mx:
+// scope_alias0 moves with the hal rows (Rebirth reload), s_on with DCMD scope.
+void scope_flush(std::vector<double> &col, int batch, int n, int ncol, uint64_t ts, uint64_t ts_last,
+                 std::vector<double> &sent_last, std::vector<char> &sent_ok, bool as_float)
+{
+    s_last_ts = ts_last;
+    Batch b;
+    for (int c = 0; c < ncol; c++) {
+        // report by exception: a column constant at its last sent value is not sent (the birth carries it)
+        double *x = &col[(size_t)c * batch];
+        if ((size_t)c < s_last.size()) s_last[c] = x[n - 1];
+        if ((size_t)c < s_on.size() && !s_on[c]) { sent_ok[c] = 0; continue; }   // off: the birth after `on` declares it
+        bool same = sent_ok[c] && x[0] == sent_last[c];
+        for (int i = 1; same && i < n; i++) same = x[i] == x[0];
+        if (same) continue;
+        sent_ok[c] = 1; sent_last[c] = x[n - 1];
+        if (as_float) { float *f = (float *)x; for (int i = 0; i < n; i++) f[i] = (float)x[i]; }
+        Metric &m = b.add(std::string(), scope_alias0 + 1 + c, 0, ts);
+        m.value_case = HN_V(BYTES_VALUE);
+        m.bytes_value.len = (size_t)n * (as_float ? 4 : 8);   // packed LE float32/float64
+        m.bytes_value.data = (uint8_t *)x;
+    }
+    if (b.ms.empty()) return;
+    // off the broker or before this session's DBIRTH: dropped (the birth declares, data follows)
+    if (born && natsConnection_Status(nc) == NATS_CONN_STATUS_CONNECTED) send(s_ddata[d_scope], b, true);
 }
 
 // The sampler FIFO -> DDATA of device scope (hal2spb's scope thread). One reader per FIFO
@@ -1246,28 +1356,171 @@ void scope_main()
         double t_last = now.tv_sec + now.tv_nsec * 1e-9 - hal_stream_depth(&st) * dt;
         double t_first = t_last - (n - 1) * dt;
         uint64_t ts = (uint64_t)llround(t_first * 1000.0);
-        std::lock_guard<std::mutex> g(mx);       // scope_alias0 moves with the hal rows (Rebirth reload)
-        s_last_ts = (uint64_t)llround(t_last * 1000.0);
-        Batch b;
-        for (int c = 0; c < ncol; c++) {
-            // report by exception: a column constant at its last sent value is not sent (the birth carries it)
-            double *x = &col[(size_t)c * batch];
-            s_last[c] = x[n - 1];
-            bool same = sent_ok[c] && x[0] == sent_last[c];
-            for (int i = 1; same && i < n; i++) same = x[i] == x[0];
-            if (same) continue;
-            sent_ok[c] = 1; sent_last[c] = x[n - 1];
-            if (as_float) { float *f = (float *)x; for (int i = 0; i < n; i++) f[i] = (float)x[i]; }
-            Metric &m = b.add(std::string(), scope_alias0 + 1 + c, 0, ts);
-            m.value_case = HN_V(BYTES_VALUE);
-            m.bytes_value.len = (size_t)n * (as_float ? 4 : 8);   // packed LE float32/float64
-            m.bytes_value.data = (uint8_t *)x;
-        }
-        if (b.ms.empty()) continue;
-        // off the broker or before this session's DBIRTH: dropped (the birth declares, data follows)
-        if (born && natsConnection_Status(nc) == NATS_CONN_STATUS_CONNECTED) send(s_ddata[d_scope], b, true);
+        std::lock_guard<std::mutex> g(mx);
+        scope_flush(col, batch, n, ncol, ts, (uint64_t)llround(t_last * 1000.0), sent_last, sent_ok, as_float);
     }
     hal_stream_detach(&st);
+}
+
+// The lcec process image ring -> DDATA of device scope (scope_image). Any number of readers: the bus
+// thread never waits on us, a row we were too slow for is lost to us only (seqlock, lcec_image.h).
+struct ICol { bool found = false, seq = false, sgn = false; uint32_t off = 0; uint8_t bit = 0; uint16_t len = 0; };
+
+double image_value(const uint8_t *img, const ICol &c)
+{
+    uint64_t raw = 0;
+    size_t nb = ((size_t)c.bit + c.len + 7) / 8;
+    memcpy(&raw, img + c.off, nb > 8 ? 8 : nb);  // EtherCAT is little endian, so is the host (x86/arm LE)
+    raw >>= c.bit;
+    if (c.len < 64) raw &= (1ull << c.len) - 1;
+    if (c.sgn && c.len < 64 && (raw >> (c.len - 1)) & 1) raw |= ~0ull << c.len;
+    return c.sgn ? (double)(int64_t)raw : (double)raw;
+}
+
+void image_main()
+{
+    std::string master;
+    std::vector<SImg> img;
+    int batch;
+    bool as_float;
+    {
+        std::lock_guard<std::mutex> g(mx);       // the rows read ONCE under mx (scope_main's reason)
+        master = s_img_master; img = simgs; batch = s_batch; as_float = s_float;
+    }
+    const int ncol = (int)img.size();
+    std::vector<double> col((size_t)batch * ncol), row(ncol);
+    std::vector<double> sent_last(ncol);
+    std::vector<char> sent_ok(ncol, 0);
+    bool said_wait = false;
+    while (running) {
+        // ПРЕДПОЛОЖЕНИЕ, не замер: a 1 s poll for the segment, as scope_main's for the sampler
+        struct timespec w1 = {1, 0};
+        int id = shmget(LCEC_IMAGE_SHMEM_KEY, 0, 0);
+        void *base = id >= 0 ? shmat(id, nullptr, SHM_RDONLY) : (void *)-1;
+        if (base == (void *)-1) {
+            if (!said_wait) say(false, "%s: NATS scope: no lcec image ring (key 0x%08x) yet - waiting\n", tag(), LCEC_IMAGE_SHMEM_KEY);
+            said_wait = true;
+            nanosleep(&w1, nullptr);
+            continue;
+        }
+        struct shmid_ds ds;
+        const lcec_image_header_t *h = (const lcec_image_header_t *)base;
+        const lcec_image_master_t *m = nullptr;
+        const char *why = nullptr;
+        if (shmctl(id, IPC_STAT, &ds) < 0 || ds.shm_segsz < sizeof *h) why = "segment unreadable";
+        else if (h->magic != LCEC_IMAGE_MAGIC || h->version != LCEC_IMAGE_VERSION) why = "magic / version not of lcec_image.h";
+        else if (h->total_size > ds.shm_segsz) why = "total_size beyond the segment";
+        else {
+            for (uint32_t k = 0; k < h->master_count && !m; k++) {
+                const lcec_image_master_t *x = (const lcec_image_master_t *)((const uint8_t *)base + h->masters_off) + k;
+                if (!strncmp(x->name, master.c_str(), LCEC_IMAGE_NAME_LEN)) m = x;
+            }
+            uint32_t state = m ? __atomic_load_n(&m->state, __ATOMIC_ACQUIRE) : 0;
+            if (!m) why = "no such master in the ring";
+            else if (state == LCEC_IMAGE_STATE_OFF) why = "the master has no ring (state OFF)";
+            else if (state == LCEC_IMAGE_STATE_STOPPED) why = "the ring is a leftover (lcec unloaded)";
+        }
+        if (why) {
+            if (!said_wait) say(true, "%s: NATS scope: lcec image ring, master %s: %s%s - waiting\n", tag(), master.c_str(), why,
+                                m && m->state == LCEC_IMAGE_STATE_OFF ? (" (off_reason " + std::to_string(m->off_reason) + ")").c_str() : "");
+            said_wait = true;
+            shmdt(base);
+            nanosleep(&w1, nullptr);
+            continue;
+        }
+        said_wait = false;
+        // the catalog: each column's entry by slave name + index:subindex
+        const lcec_image_entry_t *ents = (const lcec_image_entry_t *)((const uint8_t *)base + m->entries_off);
+        std::vector<ICol> ic(ncol);
+        std::string missing;
+        for (int c = 0; c < ncol; c++) {
+            ic[c].seq = img[c].seq; ic[c].sgn = img[c].sgn;
+            if (img[c].seq) { ic[c].found = true; continue; }
+            for (uint32_t e = 0; e < m->entry_count && !ic[c].found; e++) {
+                const lcec_image_entry_t &x = ents[e];
+                if (x.index != img[c].idx || x.subindex != img[c].sub || !x.bit_length
+                    || strncmp(x.slave_name, img[c].slave.c_str(), LCEC_IMAGE_NAME_LEN)) continue;
+                if (x.byte_off + ((size_t)x.bit_pos + x.bit_length + 7) / 8 > m->image_len || x.bit_length > 64) break;
+                ic[c].found = true; ic[c].off = x.byte_off; ic[c].bit = x.bit_pos; ic[c].len = x.bit_length;
+            }
+            if (!ic[c].found) {
+                char a[96];
+                snprintf(a, sizeof a, " %s:0x%04x:%u", img[c].slave.c_str(), img[c].idx, img[c].sub);
+                missing += a;
+            }
+        }
+        const uint64_t period = m->period_ns, depth = m->depth;
+        say(false, "%s: NATS scope: lcec image ring master %s, period %llu ns, depth %llu, %d columns%s%s\n", tag(),
+            master.c_str(), (unsigned long long)period, (unsigned long long)depth, ncol,
+            missing.empty() ? "" : " - not in the catalog (no data):", missing.c_str());
+        int div = 0, n = 0;
+        uint64_t next = __atomic_load_n(&m->head, __ATOMIC_ACQUIRE) + 1;   // history is not sent
+        uint64_t first = 0, last_row = 0, lost = 0;
+        double check_at = now_mono() + 1;
+        auto flush = [&]() {
+            if (!n) return;
+            uint64_t head = __atomic_load_n(&m->head, __ATOMIC_ACQUIRE);
+            struct timespec now; clock_gettime(CLOCK_REALTIME, &now);
+            double t_head = now.tv_sec + now.tv_nsec * 1e-9;   // the head's cycle = now
+            double t_last = t_head - (double)(head - last_row) * period * 1e-9;
+            double t_first = t_last - (double)(last_row - first) * period * 1e-9;
+            std::lock_guard<std::mutex> g(mx);
+            scope_flush(col, batch, n, ncol, (uint64_t)llround(t_first * 1000.0), (uint64_t)llround(t_last * 1000.0),
+                        sent_last, sent_ok, as_float);
+            n = 0;
+        };
+        while (running) {
+            int d = s_div.load();
+            if (d != div) {                      // a new divider: a new grid, a new dt_ns in the birth
+                flush();
+                div = d;
+                std::lock_guard<std::mutex> g(mx);
+                s_img_dt_ns = (long)(period * (uint64_t)div);
+                scope_reborn = true;
+            }
+            uint32_t state = __atomic_load_n(&m->state, __ATOMIC_ACQUIRE);
+            if (state != LCEC_IMAGE_STATE_RUNNING && state != LCEC_IMAGE_STATE_ARMED) break;
+            if (now_mono() >= check_at) {        // lcec reloaded: the key names another segment
+                check_at = now_mono() + 1;
+                if (shmget(LCEC_IMAGE_SHMEM_KEY, 0, 0) != id) break;
+            }
+            uint64_t head = __atomic_load_n(&m->head, __ATOMIC_ACQUIRE);
+            if (head < next) {
+                // ПРЕДПОЛОЖЕНИЕ, не замер: wake twice per batch, at most every 50 ms (the ring holds lcec's depth)
+                uint64_t ns = period * (uint64_t)div * (uint64_t)batch / 2;
+                if (ns > 50000000ull) ns = 50000000ull;
+                if (ns < 1000000ull) ns = 1000000ull;
+                struct timespec w = {0, (long)ns};
+                nanosleep(&w, nullptr);
+                continue;
+            }
+            uint64_t oldest = head > depth ? head - depth + 1 : 1;
+            if (next < oldest) { lost += oldest - next; next = oldest; }
+            for (; next <= head && running; next++) {
+                if (next % (uint64_t)div) continue;
+                const lcec_image_slot_t *sl = (const lcec_image_slot_t *)((const uint8_t *)base + m->ring_off
+                                                                          + ((next - 1) % depth) * m->slot_size);
+                if (__atomic_load_n(&sl->seq, __ATOMIC_ACQUIRE) != next) { lost++; continue; }
+                const uint8_t *data = LCEC_IMAGE_SLOT_DATA(sl);
+                for (int c = 0; c < ncol; c++)
+                    row[c] = ic[c].seq ? (double)next : ic[c].found ? image_value(data, ic[c]) : 0.0;
+                __atomic_thread_fence(__ATOMIC_ACQUIRE);
+                if (__atomic_load_n(&sl->seq, __ATOMIC_RELAXED) != next) { lost++; continue; }
+                if (n && next != last_row + (uint64_t)div) {   // a lost row: the batch so far is gapless, send it
+                    flush();
+                    say(true, "%s: NATS scope: lcec image ring master %s: rows lost before seq %llu (%llu lost so far) - "
+                        "the reader is slower than the ring\n", tag(), master.c_str(), (unsigned long long)next, (unsigned long long)lost);
+                }
+                if (!n) first = next;
+                for (int c = 0; c < ncol; c++) col[(size_t)c * batch + n] = row[c];
+                last_row = next;
+                if (++n == batch) flush();
+            }
+        }
+        flush();
+        say(false, "%s: NATS scope: lcec image ring master %s gone (reload / unload) - attaching again\n", tag(), master.c_str());
+        shmdt(base);
+    }
 }
 
 // ---- PINS: the hal2spb conf line format ----
@@ -1435,6 +1688,31 @@ bool load_pins(const std::string &path)
             double sc = 1.0;
             if (w.size() > 2 && !num(w[2], sc)) { bad("scope_col " + w[1] + ": scale " + w[2]); break; }
             scols.push_back(SCol{w[1].substr(0, dot), w[1].substr(dot + 1), sc});
+        } else if (a == "scope_image") {
+            if (w.size() != 3 || !num(w[2], v) || v < 1 || v != std::floor(v)) { bad("scope_image <master> <divider >= 1>"); break; }
+            if (w[1].size() >= LCEC_IMAGE_NAME_LEN) { bad("scope_image " + w[1] + ": longer than an lcec name"); break; }
+            s_img_master = w[1]; s_img_div = (int)v;
+        } else if (a == "scope_img") {
+            size_t dot = w.size() < 3 ? std::string::npos : w[1].find('.');
+            SImg im;
+            if (dot != std::string::npos && w.size() == 3 && w[2] == "seq") im.seq = true;
+            else {
+                char *e1 = nullptr, *e2 = nullptr;
+                size_t colon = w.size() == 5 ? w[3].find(':') : std::string::npos;
+                if (dot == std::string::npos || colon == std::string::npos || (w[4] != "s" && w[4] != "u")) {
+                    bad("scope_img <Key.chan> <slave> <index>:<subindex> s|u | scope_img <Key.chan> seq"); break;
+                }
+                std::string is = w[3].substr(0, colon), ss = w[3].substr(colon + 1);
+                unsigned long ix = strtoul(is.c_str(), &e1, 0), sx = strtoul(ss.c_str(), &e2, 0);
+                if (is.empty() || ss.empty() || *e1 || *e2 || ix > 0xffff || sx > 0xff) { bad("scope_img " + w[1] + ": object " + w[3]); break; }
+                if (w[2].size() >= LCEC_IMAGE_NAME_LEN) { bad("scope_img " + w[1] + ": slave name longer than an lcec name"); break; }
+                im.slave = w[2]; im.idx = (unsigned)ix; im.sub = (unsigned)sx; im.sgn = w[4] == "s";
+            }
+            for (const SCol &o : scols)
+                if (o.key == w[1].substr(0, dot) && o.ch == w[1].substr(dot + 1)) { bad("scope_img " + w[1] + ": a second column of the name"); break; }
+            if (!good) break;
+            scols.push_back(SCol{w[1].substr(0, dot), w[1].substr(dot + 1), 1.0});
+            simgs.push_back(im);
         } else if (a == "url" || a == "user" || a == "pass" || a == "node" || a == "spb_group"
                    || a == "spb_birth_s" || a == "format" || a == "scope_subject") {
             ignored += " " + a;                  // hal2spb's runtime keys: the environment / INI [NATS] give them
@@ -1458,6 +1736,17 @@ bool load_pins(const std::string &path)
     }
     if (!ignored.empty())
         say(false, "%s: NATS PINS %s: ignored (the environment / INI [NATS] give them):%s\n", tag(), path.c_str(), ignored.c_str());
+    if (!s_img_master.empty() || !simgs.empty()) {
+        const char *e = s_chan >= 0 ? "scope_image and scope_channel - one source of device scope"
+                      : s_img_master.empty() ? "scope_img rows without scope_image <master> <divider>"
+                      : simgs.empty() ? "scope_image without scope_img rows"
+                      : simgs.size() != scols.size() ? "scope_col rows next to scope_image - its columns are scope_img rows"
+                      : s_batch <= 0 ? "scope_image without scope_batch > 0" : nullptr;
+        if (e) {
+            say(true, "%s: NATS PINS %s: %s - NATS publishing refused\n", tag(), path.c_str(), e);
+            return false;
+        }
+    }
     if (s_chan >= 0) {
         if (scols.empty() || s_batch <= 0 || s_dt_ns <= 0 || (int)scols.size() > HAL_STREAM_MAX_PINS) {
             say(true, "%s: NATS PINS %s: scope_channel needs scope_col (1..%d), scope_batch > 0 and "
@@ -1494,6 +1783,9 @@ struct PinsSet {
     long s_dt_ns = 0;
     bool s_float = false;
     std::vector<SCol> scols;
+    std::string s_img_master;
+    int s_img_div = 0;
+    std::vector<SImg> simgs;
     std::vector<TagEnd> tends;
     std::map<std::string, std::string> tag_alive, tag_alive_of;
     std::string tag_own_stand;
@@ -1503,6 +1795,7 @@ struct PinsSet {
 void swap_pins(PinsSet &p)                       // the globals <-> p, field by field
 {
     p.hpins.swap(hpins); p.scols.swap(scols); p.tends.swap(tends);
+    p.s_img_master.swap(s_img_master); p.simgs.swap(simgs); std::swap(p.s_img_div, s_img_div);
     p.tag_alive.swap(tag_alive); p.tag_alive_of.swap(tag_alive_of);
     p.tag_own_stand.swap(tag_own_stand); p.tag_ok_src.swap(tag_ok_src);
     std::swap(p.keepalive_s, keepalive_s); std::swap(p.hal_period_s, hal_period_s);
@@ -1516,6 +1809,10 @@ bool same_scope(const PinsSet &o)
         || o.scols.size() != scols.size()) return false;
     for (size_t c = 0; c < scols.size(); c++)
         if (o.scols[c].key != scols[c].key || o.scols[c].ch != scols[c].ch || o.scols[c].scale != scols[c].scale) return false;
+    if (o.s_img_master != s_img_master || o.s_img_div != s_img_div || o.simgs.size() != simgs.size()) return false;
+    for (size_t c = 0; c < simgs.size(); c++)
+        if (o.simgs[c].slave != simgs[c].slave || o.simgs[c].idx != simgs[c].idx || o.simgs[c].sub != simgs[c].sub
+            || o.simgs[c].sgn != simgs[c].sgn || o.simgs[c].seq != simgs[c].seq) return false;
     return true;
 }
 
@@ -1554,7 +1851,7 @@ std::string subs_key()
     std::set<std::string> watch;
     for (const auto &a : tag_alive_of) watch.insert(a.first);
     for (const TagEnd &t : tends) if (t.out) watch.insert(t.key);
-    std::string k = std::string(has_out ? "o" : "-") + (guard ? "g" : "-");
+    std::string k = std::string(has_out ? "o" : "-") + (guard ? "g" : "-") + (s_img_master.empty() ? "-" : "i");
     for (const std::string &w : watch) k += "\n" + w;
     return k;
 }
@@ -1572,6 +1869,8 @@ natsStatus subscribe_all()
     bool has_out = false;
     for (const HPin &p : hpins) has_out = has_out || p.out;
     if (st == NATS_OK && has_out) st = natsConnection_Subscribe(&dcmd_sub, nc, s_dcmd_hal.c_str(), on_dcmd, nullptr);
+    if (st == NATS_OK && !s_img_master.empty())
+        st = natsConnection_Subscribe(&dcmd_scope_sub, nc, s_dcmd_scope.c_str(), on_dcmd_scope, nullptr);
     // tags: watch the republish of every liveness key and reader key (libnats resubscribes on reconnect)
     std::set<std::string> watch;
     for (const auto &a : tag_alive_of) watch.insert(a.first);
@@ -1718,6 +2017,9 @@ int start(const Config &c, int hal_comp_id, Owner *owner)
     }
     s_ncmd = base + "NCMD." + cfg.node;
     s_dcmd_hal = base + "DCMD." + cfg.node + ".hal";
+    s_dcmd_scope = base + "DCMD." + cfg.node + ".scope";
+    s_on.assign(scols.size(), 1);
+    s_div = s_img_div > 0 ? s_img_div : 1;
     s_snapshot = "lcnc." + cfg.group + "." + cfg.node + ".snapshot";
     bdseq = (int64_t)(now_ms() & 0xff);  // a fresh bdSeq per run (no persisted counter yet)
 
@@ -1758,6 +2060,7 @@ int start(const Config &c, int hal_comp_id, Owner *owner)
     running = true;
     pub_thread = std::thread(publisher);
     if (s_chan >= 0) scope_thread = std::thread(scope_main);
+    else if (!s_img_master.empty()) scope_thread = std::thread(image_main);
     for (const HPin &p : hpins)
         if (p.out) say(false, "%s: NATS hal out %s (%s %s) <- %s%s\n", tag(), p.metric.c_str(), p.sig ? "signal" : "pin",
                        p.src.c_str(), s_dcmd_hal.c_str(), p.has_safe ? ", safe= while the Primary Host is away" : "");

@@ -517,6 +517,17 @@ AC_ARG_WITH(
     [SPARKPLUG_PROTO=$withval],
     [SPARKPLUG_PROTO=]
 )
+# The lcec process image ring layout (halnats' scope_image source): its one home is the lcec fork's
+# src/lcec_image.h - named here, never copied (lcec builds against LinuxCNC, so no lcec-dev package here).
+AC_ARG_WITH(
+    [lcec-image-h],
+    AS_HELP_STRING(
+        [--with-lcec-image-h=FILE],
+        [lcec_image.h of linuxcnc-ethercat: the process image ring halnats reads.]
+    ),
+    [LCEC_IMAGE_H=$withval],
+    [LCEC_IMAGE_H=]
+)
 
 AS_IF(
     [test "x$WITH_NATS" != "xno"],
@@ -548,6 +559,13 @@ AS_IF(
         else
             AC_MSG_RESULT(no); NATS_MISSING="$NATS_MISSING --with-sparkplug-proto=FILE"
         fi
+        AC_MSG_CHECKING([for lcec_image.h])
+        if test -n "$LCEC_IMAGE_H" && test -r "$LCEC_IMAGE_H"; then
+            LCEC_IMAGE_H=`cd "$(dirname "$LCEC_IMAGE_H")" && pwd`/`basename "$LCEC_IMAGE_H"`
+            AC_MSG_RESULT([$LCEC_IMAGE_H])
+        else
+            AC_MSG_RESULT(no); NATS_MISSING="$NATS_MISSING --with-lcec-image-h=FILE"
+        fi
         if test -z "$NATS_MISSING"; then
             AC_DEFINE([HAVE_LIBNATS], [1],
                 [define if milltask publishes its status to NATS (libnats + protobuf-c)])
@@ -564,6 +582,7 @@ AC_SUBST([PROTOBUFC_CFLAGS])
 AC_SUBST([PROTOBUFC_LIBS])
 AC_SUBST([PROTOC_C])
 AC_SUBST([SPARKPLUG_PROTO])
+AC_SUBST([LCEC_IMAGE_H])
 
 
 #

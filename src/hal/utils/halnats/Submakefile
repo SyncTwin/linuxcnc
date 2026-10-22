@@ -5,7 +5,8 @@
 # by protoc-c. Without libnats nothing is built and milltask has its "off" stub.
 ifdef HAVE_LIBNATS
 SPB_GEN := objects/spb
-HALNATS_CFLAGS := -I$(SPB_GEN) -Ihal/utils/halnats $(LIBNATS_CFLAGS) $(PROTOBUFC_CFLAGS)
+# lcec_image.h by its configured path (a computed include, no -I into the lcec tree)
+HALNATS_CFLAGS := -I$(SPB_GEN) -Ihal/utils/halnats $(LIBNATS_CFLAGS) $(PROTOBUFC_CFLAGS) '-DLCEC_IMAGE_H="$(LCEC_IMAGE_H)"'
 HALNATS_LIBS := $(LIBNATS_LIBS) $(PROTOBUFC_LIBS)
 
 $(SPB_GEN)/sparkplug_b_payload.pb-c.c $(SPB_GEN)/sparkplug_b_payload.pb-c.h: $(SPARKPLUG_PROTO)
@@ -16,7 +17,7 @@ $(SPB_GEN)/sparkplug_b_payload.pb-c.c $(SPB_GEN)/sparkplug_b_payload.pb-c.h: $(S
 
 HALNATSLIBSRCS := hal/utils/halnats/halnats.cc $(SPB_GEN)/sparkplug_b_payload.pb-c.c
 USERSRCS += $(HALNATSLIBSRCS)
-objects/hal/utils/halnats/halnats.o: $(SPB_GEN)/sparkplug_b_payload.pb-c.h
+objects/hal/utils/halnats/halnats.o: $(SPB_GEN)/sparkplug_b_payload.pb-c.h $(LCEC_IMAGE_H)
 $(call TOOBJSDEPS, $(HALNATSLIBSRCS)): EXTRAFLAGS += $(HALNATS_CFLAGS)
 
 ../lib/libhalnats.a: $(call TOOBJS, $(HALNATSLIBSRCS))
