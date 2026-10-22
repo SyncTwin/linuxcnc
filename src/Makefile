@@ -1308,6 +1308,18 @@ tpmod-objs += $(MATHSTUB)
 TORTOBJS = $(foreach file,$($(patsubst %.o,%,$(1))-objs), objects/rt$(file))
 ifeq ($(BUILD_SYS),uspace)
 EXTRA_CFLAGS += -fPIC -O2 $(filter -Wextra,$(CFLAGS)) $(filter -Werror,$(CFLAGS))
+# SyncTwin fork: only the realtime modules named in synctwin/build-allowlist.txt (rt/kins lines) are built, so
+# only they land in ../rtlib and install-kernel-dep installs nothing else. A listed name the tree does not build
+# is an error: the list and the tree must not drift apart silently.
+SYNCTWIN_ALLOWLIST := $(BASEPWD)/../synctwin/build-allowlist.txt
+SYNCTWIN_RT := $(shell awk '$$1=="rt"||$$1=="kins"{print $$2".o"}' $(SYNCTWIN_ALLOWLIST))
+ifeq ($(SYNCTWIN_RT),)
+$(error no rt/kins modules read from $(SYNCTWIN_ALLOWLIST))
+endif
+ifneq ($(filter-out $(obj-m),$(SYNCTWIN_RT)),)
+$(error $(SYNCTWIN_ALLOWLIST) names modules this tree does not build: $(filter-out $(obj-m),$(SYNCTWIN_RT)))
+endif
+obj-m := $(filter $(SYNCTWIN_RT),$(obj-m))
 RTOBJS := $(sort $(foreach mod,$(obj-m),$(call TORTOBJS,$(mod))))
 RTDEPS := $(sort $(RTOBJS:.o=.d))
 

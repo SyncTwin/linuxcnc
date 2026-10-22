@@ -209,7 +209,10 @@ subst control.top.in > control
 echo >> control
 subst control.main-pkg.in >> control
 
-subst linuxcnc.install.in > ${MAIN_PACKAGE_NAME}.install
+# SyncTwin fork: the package carries what synctwin/build-allowlist.txt names (bin/path lines), nothing else.
+ALLOWLIST=../synctwin/build-allowlist.txt
+[ -r "$ALLOWLIST" ] || { echo "E: $ALLOWLIST not found - the package content has no source" >&2; exit 1; }
+awk '$1=="bin"{print "usr/bin/" $2} $1=="path"{$1=""; sub(/^ /,""); print}' "$ALLOWLIST" > ${MAIN_PACKAGE_NAME}.install
 subst linuxcnc.lintian-overrides.in > ${MAIN_PACKAGE_NAME}.lintian-overrides
 subst linuxcnc.manpages.in > ${MAIN_PACKAGE_NAME}.manpages
 

@@ -1,0 +1,102 @@
+# SyncTwin fork build allowlist — the ONE list of what the linuxcnc-uspace package carries.
+# Readers: src/Makefile (rt/kins: only these realtime modules are built and installed),
+#          debian/configure (bin/path: writes debian/linuxcnc-uspace.install from this file).
+# Machine-readable for the printers: every `loadrt X` they print must be an `rt`/`kins` line here,
+# or an out-of-tree component built on the VM by halcompile (st_cia402, shaper, port_env, plant, iec_*, lcec — not
+# this package). The -dev package keeps debian/linuxcnc-uspace-dev.install (halcompile, headers) as is.
+#
+# Format: one entry per line, `<kind> <name> [<dest>]`, `#` starts a comment.
+#   rt   <module>        realtime module /usr/lib/linuxcnc/modules/<module>.so
+#   kins <module>        kinematics module, same place (own kind so a printer can tell [KINS]KINEMATICS apart)
+#   bin  <name>          /usr/bin/<name>
+#   path <src> [<dest>]  any other installed path, as a dh_install line
+# A name absent from the fork's obj-m is a build error (src/Makefile), not a silent skip.
+
+# --- HAL core and motion (uspace: rtapi is linked into rtapi_app, not a module)
+rt hal_lib
+rt motmod
+rt tpmod
+rt homemod
+rt threads
+
+# --- HAL components our printers load (golden backend/tests/golden, printers services/printers)
+rt abs
+rt and2
+rt charge_pump
+rt comp
+rt conv_real_sint
+rt conv_sint_bool
+rt conv_sint_real
+rt dbounce
+rt ddt
+rt encoder
+rt estop_latch
+rt gearchange
+rt limit1
+rt limit2
+rt limit3
+rt logic
+rt lowpass
+rt mux2
+rt near
+rt not
+rt offset
+rt or2
+rt sampler
+rt scale
+rt sim_spindle
+rt sum2
+rt timedelay
+rt watchdog
+rt wcomp
+
+# --- PLCopen motion (lib/iec/mc_plcopen.st, iec2comp)
+rt mc_axis
+rt mc_gear
+rt mc_group
+
+# --- kinematics: all the fork builds (twin kinematics catalog picks among them)
+kins 5axiskins
+kins corexykins
+kins genhexkins
+kins genserkins
+kins lineardeltakins
+kins maxkins
+kins palletkins
+kins pentakins
+kins pumakins
+kins rosekins
+kins rotarydeltakins
+kins rotatekins
+kins scarakins
+kins scorbot-kins
+kins three21kins
+kins tripodkins
+kins trivkins
+kins xyzac-trt-kins
+kins xyzbc-trt-kins
+
+# --- user space
+bin rtapi_app
+bin halcmd
+bin halrun
+bin milltask
+bin halnats
+bin linuxcnc
+bin inivar
+bin linuxcnc_check_ini
+# Tcl and the manual tool change stay until the printers stop loading them (basic_sim.tcl, hal_manualtoolchange):
+# removing them is the printers' step first, then these lines and the two paths below.
+bin haltcl
+bin hal_manualtoolchange
+
+# --- other installed paths
+path etc
+path usr/lib/lib*.so.*
+path usr/lib/linuxcnc
+path usr/lib/python3
+path usr/share/tcltk
+path usr/share/linuxcnc/hallib/
+path usr/share/linuxcnc/ncfiles/
+path debian/extras/etc /
+path debian/extras/lib /usr
