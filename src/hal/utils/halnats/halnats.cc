@@ -19,7 +19,13 @@
 *            STATE (NATS has no retain/Will: the host repeats it) - every safe= row is written
 *            its value once and DCMD to those rows is refused; STATE online again lets commands
 *            through (the safe values stay until a command changes them).
-*     spb_host_ttl_s <s>    silence of the Primary Host STATE that counts as offline (needed with safe=)
+*     spb_host_ttl_s <s>    silence of the Primary Host STATE that counts as offline (needed with safe=, host_ok)
+*     host_ok sig=<signal> | src=<pin>
+*            bit, the Primary Host awareness as a level (the node's PackML Stop, not an E-STOP): 1 while the
+*            Primary Host is online (the same judgement as safe=: STATE online and younger than
+*            spb_host_ttl_s), 0 at start until its first STATE online, on STATE online=false, after the
+*            silence or the NATS link lost; written on every change, back to 1 by itself on the host's
+*            return. Needs a Primary Host id and spb_host_ttl_s.
 *     hz <f>                read rate of the hal sources (else every publisher period)
 *     spb_keepalive_s <s>   an empty DDATA of hal after s of silence
 *     sampler_channel <n> | sampler_batch <n> | sampler_dt_ns <n> | sampler_type double|float |
@@ -136,7 +142,11 @@ double host_ttl_s = 0;                           // spb_host_ttl_s of the file
 std::atomic<bool> host_online{false};            // the last STATE said online (nats thread)
 std::atomic<double> host_seen{0};                // CLOCK_MONOTONIC of that STATE
 std::atomic<bool> held_safe{false};              // safe values written, DCMD to safe= rows refused
-bool guard = false;                              // safe= rows and a Primary Host id
+bool guard = false;                              // safe= rows or host_ok, and a Primary Host id
+bool host_ok_sig = false;
+std::string host_ok_src;                         // host_ok sig=|src=: bit, the Primary Host online
+int host_ok_last = -1;
+int host_ok_err = 0;                             // the last refusal of the host_ok write, said once
 natsSubscription *state_sub = nullptr;
 
 // device sampler: the sampler FIFO of a guest (its columns in the guest's units: joint pos-fb, vel, ...)
@@ -537,7 +547,8 @@ void on_state(natsConnection *, natsSubscription *, natsMsg *msg, void *)
     host_seen = now_mono();
 }
 
-// the guard, in the publisher loop: host away -> every safe= row its value, once per absence
+// the guard, in the publisher loop: host away -> every safe= row its value, once per absence; host_ok follows
+// the same judgement as a level, written on every change
 void host_guard()
 {
     if (!guard) return;
@@ -551,6 +562,14 @@ void host_guard()
     } else if (alive && held_safe) {
         held_safe = false;
         say(false, "%s: NATS Primary Host %s online - commands to the safe outputs taken again\n", tag(), cfg.host.c_str());
+    }
+    if (!host_ok_src.empty() && (int)alive != host_ok_last) {
+        hal_query_value_u v;
+        memset(&v, 0, sizeof v);
+        v.b = alive;
+        int rc = hal_set_named(host_ok_sig, host_ok_src, HAL_BOOL, v);
+        if (rc) { if (rc != host_ok_err) say(true, "%s: NATS host_ok -> %s: %s\n", tag(), host_ok_src.c_str(), hal_err(rc)); host_ok_err = rc; }
+        else { host_ok_err = 0; host_ok_last = alive; say(!alive, "%s: NATS host_ok %d\n", tag(), (int)alive); }
     }
 }
 
@@ -1694,6 +1713,9 @@ bool load_pins(const std::string &path)
         } else if (a == "tag_ok") {
             if (w.size() != 2 || (w[1].compare(0, 4, "sig=") && w[1].compare(0, 4, "src=")) || w[1].size() < 5) { bad("tag_ok sig=<signal>|src=<pin>"); break; }
             tag_ok_sig = !w[1].compare(0, 4, "sig="); tag_ok_src = w[1].substr(4);
+        } else if (a == "host_ok") {
+            if (w.size() != 2 || (w[1].compare(0, 4, "sig=") && w[1].compare(0, 4, "src=")) || w[1].size() < 5) { bad("host_ok sig=<signal>|src=<pin>"); break; }
+            host_ok_sig = !w[1].compare(0, 4, "sig="); host_ok_src = w[1].substr(4);
         } else if (a == "sampler_channel" || a == "sampler_batch" || a == "sampler_dt_ns" || a == "scope_batch"
                    || a == "spb_keepalive_s" || a == "hz"
                    || a == "spb_host_ttl_s" || a == "tag_ttl_s") {
@@ -1824,6 +1846,8 @@ struct PinsSet {
     std::string tag_own_stand;
     bool tag_ok_sig = false;
     std::string tag_ok_src;
+    bool host_ok_sig = false;
+    std::string host_ok_src;
 };
 void swap_pins(PinsSet &p)                       // the globals <-> p, field by field
 {
@@ -1836,6 +1860,7 @@ void swap_pins(PinsSet &p)                       // the globals <-> p, field by 
     std::swap(p.host_ttl_s, host_ttl_s); std::swap(p.tag_ttl_s, tag_ttl_s);
     std::swap(p.s_chan, s_chan); std::swap(p.m_batch, m_batch); std::swap(p.m_dt_ns, m_dt_ns);
     std::swap(p.m_float, m_float); std::swap(p.tag_ok_sig, tag_ok_sig);
+    std::swap(p.host_ok_sig, host_ok_sig); p.host_ok_src.swap(host_ok_src);
 }
 bool same_scope(const PinsSet &o)
 {
@@ -1870,8 +1895,18 @@ bool pins_check()
         say(true, "%s: NATS PINS: safe= outputs without spb_host_ttl_s - publishing refused\n", tag());
         return false;
     }
-    bool g = n_safe && !cfg.host.empty() && cfg.host.find_first_of(".*> ") == std::string::npos;
-    if (n_safe && !cfg.host.empty() && !g) {
+    bool hok = !host_ok_src.empty();
+    if (hok && cfg.host.empty()) {
+        say(true, "%s: NATS PINS: host_ok but no Primary Host id (SYNCTWIN_SPB_PRIMARY_HOST, INI [NATS] PRIMARY_HOST) "
+            "- publishing refused\n", tag());
+        return false;
+    }
+    if (hok && !(host_ttl_s > 0)) {
+        say(true, "%s: NATS PINS: host_ok without spb_host_ttl_s - publishing refused\n", tag());
+        return false;
+    }
+    bool g = (n_safe || hok) && !cfg.host.empty() && cfg.host.find_first_of(".*> ") == std::string::npos;
+    if ((n_safe || hok) && !cfg.host.empty() && !g) {
         say(true, "%s: NATS Primary Host id '%s' is not a NATS token - publishing refused\n", tag(), cfg.host.c_str());
         return false;
     }
@@ -1971,6 +2006,7 @@ void reload()
     rested.clear();                              // tag_expire rests every reader end of a dead stand again (new ends too)
     rejected.clear();
     tag_ok_last = -1;
+    host_ok_last = -1;                           // host_guard writes host_ok again (a new pin too)
     if (tends.empty()) tlink = false;
     else if (conn && tlink) {
         // the link stays up (tag_ok does not blink): read current over the resubscribe gap, BIRTH the writers again
@@ -2105,8 +2141,9 @@ int start(const Config &c, int hal_comp_id, Owner *owner)
     for (const HPin &p : hpins)
         if (p.out) say(false, "%s: NATS hal out %s (%s %s) <- %s%s\n", tag(), p.metric.c_str(), p.sig ? "signal" : "pin",
                        p.src.c_str(), s_dcmd_hal.c_str(), p.has_safe ? ", safe= while the Primary Host is away" : "");
-    if (guard) say(false, "%s: NATS Primary Host %s: STATE spBv1//0.STATE.%s, silence %g s = offline\n",
-                   tag(), cfg.host.c_str(), cfg.host.c_str(), host_ttl_s);
+    if (guard) say(false, "%s: NATS Primary Host %s: STATE spBv1//0.STATE.%s, silence %g s = offline%s\n",
+                   tag(), cfg.host.c_str(), cfg.host.c_str(), host_ttl_s,
+                   host_ok_src.empty() ? "" : (", host_ok -> " + host_ok_src).c_str());
     if (!own_cmds.empty()) say(false, "%s: NATS commands <- %s\n", tag(), own_cmds.c_str());
     for (const TagEnd &t : tends)
         say(false, "%s: NATS tag %s %s %s %s %s (writer %s, stand %s)%s\n", tag(), tag_type_names[t.tt], t.key.c_str(),
