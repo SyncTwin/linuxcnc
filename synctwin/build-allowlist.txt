@@ -85,6 +85,9 @@ bin milltask
 bin halnats
 bin linuxcnc
 bin inivar
+# inivalue is the reader under both: `inivar` is a thunk to it (src/emc/ini/inivar) and scripts/linuxcnc.in runs
+# `inivalue "$INIFILE"` before anything else — without it every start exits 1 (synctwin18, vm-stand2 23.10).
+bin inivalue
 bin linuxcnc_check_ini
 # No Tcl and no manual tool change: no printed .ini names LIB:basic_sim.tcl or TWOPASS, no display shows the popup.
 
