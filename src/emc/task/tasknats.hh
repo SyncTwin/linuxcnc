@@ -11,7 +11,7 @@
 *   halnats library (hal/utils/halnats/halnats.hh) - the same code as the
 *   halnats binary of VMs without LinuxCNC; the task adds its status devices.
 *   Config: the VM environment SYNCTWIN_NATS_URL/USER/PASS, SYNCTWIN_BOX_ID
-*   (group), NODE_ID + "-task" (node); INI [NATS] URL USER PASS GROUP NODE
+*   (group), NODE_ID + "-lcnc" (node); INI [NATS] URL USER PASS GROUP NODE
 *   override, PUBLISH_PERIOD optional (default [TASK] CYCLE_TIME), PINS = <file>
 *   (relative to the INI's folder) - devices hal / scope. No URL - publishing
 *   - the task refuses to start

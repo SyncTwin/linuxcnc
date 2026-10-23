@@ -14,8 +14,10 @@
 *   devices, or a device name), metrics "<device>/<metric>".
 *   Strings (task/file, task/command) go out as Sparkplug String.
 *
-*   Node = NODE_ID - the ONE Sparkplug node of the VM (hal2spb is gone, owner
-*   18.10); INI [NATS] NODE overrides.
+*   Node = NODE_ID + "-lcnc" (owner 23.10; aicnc spb_ncmd.lcnc_node is the one
+*   home of the name): the base's halnats publishes as NODE_ID, and one
+*   session is one Edge Node (Sparkplug B 3.0) - two processes never share a
+*   node name. INI [NATS] NODE overrides.
 *
 * License: GPL Version 2
 * Copyright (c) 2026 SyncTwin Technologies
@@ -694,13 +696,16 @@ void log_line(bool error, const char *ln)
 
 } // namespace
 
+// the task's own Edge Node next to the base's NODE_ID (aicnc spb_ncmd.lcnc_node)
+static const char *const TASK_NODE_SUFFIX = "-lcnc";
+
 int taskNatsInit(const char *inifile, int joints, double task_cycle_time, int hal_comp_id, int cmd_queue)
 {
     halnats::Config c;
     c.tag = "task";
     c.log = log_line;
     // the publisher's period: [NATS] PUBLISH_PERIOD, else the task cycle (one publish per task cycle at most)
-    int r = halnats::configure(c, inifile, "", task_cycle_time);
+    int r = halnats::configure(c, inifile, TASK_NODE_SUFFIX, task_cycle_time);
     if (r > 0) {
         rcs_print_error("task: no NATS URL ([NATS] URL or SYNCTWIN_NATS_URL) - NATS is the only command "
                         "source and status sink (no NML), the task cannot run without it\n");
