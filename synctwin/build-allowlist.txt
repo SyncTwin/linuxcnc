@@ -28,6 +28,7 @@ rt conv_real_sint
 rt conv_sint_bool
 rt conv_sint_real
 rt dbounce
+rt debounce
 rt ddt
 rt encoder
 rt estop_latch
@@ -85,17 +86,13 @@ bin halnats
 bin linuxcnc
 bin inivar
 bin linuxcnc_check_ini
-# Tcl and the manual tool change stay until the printers stop loading them (basic_sim.tcl, hal_manualtoolchange):
-# removing them is the printers' step first, then these lines and the two paths below.
-bin haltcl
-bin hal_manualtoolchange
+# No Tcl and no manual tool change: no printed .ini names LIB:basic_sim.tcl or TWOPASS, no display shows the popup.
 
 # --- other installed paths
 path etc
 path usr/lib/lib*.so.*
 path usr/lib/linuxcnc
 path usr/lib/python3
-path usr/share/tcltk
 path usr/share/linuxcnc/hallib/
 path usr/share/linuxcnc/ncfiles/
 path debian/extras/etc /
