@@ -30,11 +30,16 @@
 *     spb_keepalive_s <s>   an empty DDATA of hal after s of silence
 *     sampler_channel <n> | sampler_batch <n> | sampler_dt_ns <n> | sampler_type double|float |
 *     sampler_col <Key.chan> [scale]
-*            Device sampler: the FIFO of `sampler` channel n of a guest (hal_stream, as halsampler; one
-*            reader per FIFO; columns in the guest's units - joint pos-fb, vel, ...), attached once the
-*            sampler component exists, the tail queued at attach dropped, then batches of sampler_batch rows as one DDATA of
-*            DoubleArray/FloatArray columns (packed LE) stamped with the first row's time; a
-*            column constant at its last sent value is left out (report by exception).
+*            Device sampler: the FIFOs of `sampler` of the guests of a VM - one block per guest: a
+*            sampler_channel row opens a block, the sampler_* rows below it are that block's (channel n,
+*            hal_stream, as halsampler; one reader per FIFO, one thread per block; columns in the guest's
+*            units - joint pos-fb, vel, ...). Every block is under the ONE device sampler (its columns
+*            one after another, one dt_ns and one type for all blocks: the base's servo thread; a column
+*            name once in the device). A FIFO is attached once the sampler component exists, the tail
+*            queued at attach dropped, then batches of sampler_batch rows as one DDATA of the block's
+*            DoubleArray/FloatArray columns (packed LE) stamped with the first row's time; a column
+*            constant at its last sent value is left out (report by exception). The file is the same
+*            for every guest launched on the VM, so a launch does not change the base.
 *     scope_image <master> <divider> | scope_batch <n> | scope_type double|float |
 *     scope_img <Key.chan> <master> <slave> <index>:<subindex> s|u | scope_img <Key.chan> <master> seq
 *            Device scope: the lcec process image ring (no LinuxCNC, no sampler, no node needed; next to
@@ -149,14 +154,17 @@ int host_ok_last = -1;
 int host_ok_err = 0;                             // the last refusal of the host_ok write, said once
 natsSubscription *state_sub = nullptr;
 
-// device sampler: the sampler FIFO of a guest (its columns in the guest's units: joint pos-fb, vel, ...)
-int s_chan = -1, m_batch = 0;
-long m_dt_ns = 0;
-bool m_float = false;
+// device sampler: the sampler FIFOs of the guests (columns in the guest's units: joint pos-fb, vel, ...).
+// One block per sampler_channel row; mcols = the columns of every block, block after block (the device's).
 struct SCol { std::string key, ch; double scale; };
+struct SBlock { int chan = -1, batch = 0; size_t col0 = 0, ncol = 0; };
+std::vector<SBlock> sblocks;
+long m_dt_ns = 0;                                // one for the device (every block's, checked)
+bool m_float = false;                            // one for the device (every block's, checked)
 std::vector<SCol> mcols;
-std::vector<double> m_last;                      // under mx: the last value read of each scope column
-uint64_t m_last_ts = 0;                          // under mx: ms of that row; 0 = nothing read yet
+std::vector<double> m_last;                      // under mx: the last value read of each column of the device
+std::vector<uint64_t> m_last_ts;                 // under mx, per block: ms of its last row; 0 = nothing read yet
+std::vector<int> m_nread;                        // under mx, per block: columns its FIFO carries (<= ncol)
 int hal_comp = -1;
 // device scope: the lcec process image ring (scope_image) - raw PDO entries of every slave, always on;
 // simgs is parallel to icols
@@ -182,7 +190,8 @@ natsConnection *nc = nullptr;
 natsSubscription *snap_sub = nullptr, *ncmd_sub = nullptr, *dcmd_sub = nullptr;
 std::vector<natsSubscription *> own_dcmd_subs;   // DCMD of the owner devices that take commands
 std::vector<size_t> own_dcmd_dev;                // closure of each: the device index (stable storage)
-std::thread pub_thread, sampler_thread;
+std::thread pub_thread;
+std::vector<std::thread> sampler_threads;     // one per sampler block
 std::vector<std::thread> img_threads;            // one per scope_image master
 std::atomic<bool> running{false}, need_birth{false};
 std::atomic<bool> need_reload{false};           // Rebirth / SIGHUP: PINS re-read, resubscribed, births (publisher)
@@ -367,8 +376,9 @@ void hal_datas()
 // ---- devices sampler and scope (declared in births, data from sampler_main / image_main) ----
 
 // The birth of a scope-like device (sampler / scope): dt_ns + one array per column in force.
+// cts: per column the ms of its last row read (0 = nothing read yet)
 void dev_birth(size_t dev, uint64_t alias0, long dt, const std::vector<SCol> &cols, const std::vector<double> &last,
-               uint64_t last_ts, const std::vector<char> &on, bool as_float)
+               const std::vector<uint64_t> &cts, const std::vector<char> &on, bool as_float)
 {
     Batch b;
     Metric &m = b.add("dt_ns", alias0, HN_DT(Int64), 0);
@@ -379,9 +389,9 @@ void dev_birth(size_t dev, uint64_t alias0, long dt, const std::vector<SCol> &co
     std::vector<float> f(cols.size());
     for (size_t c = 0; c < cols.size(); c++) {
         if (c < on.size() && !on[c]) continue;   // off by DCMD scope `columns`: not declared
-        bool have = last_ts && c < last.size();
+        bool have = c < cts.size() && cts[c] && c < last.size();
         Metric &mc = b.add(cols[c].key + "/" + cols[c].ch, alias0 + 1 + c,
-                           as_float ? HN_DT(FloatArray) : HN_DT(DoubleArray), have ? last_ts : 0);
+                           as_float ? HN_DT(FloatArray) : HN_DT(DoubleArray), have ? cts[c] : 0);
         mc.value_case = HN_V(BYTES_VALUE); mc.bytes_value.len = 0; mc.bytes_value.data = nullptr;
         if (!have) continue;
         d[c] = last[c]; f[c] = (float)last[c];
@@ -390,8 +400,17 @@ void dev_birth(size_t dev, uint64_t alias0, long dt, const std::vector<SCol> &co
     }
     send(s_dbirth[dev], b, true);
 }
-void sampler_birth() { dev_birth(d_smp, m_alias0, m_dt_ns, mcols, m_last, m_last_ts, {}, m_float); }
-void scope_birth() { dev_birth(d_scope, i_alias0, s_img_dt_ns, icols, i_last, i_last_ts, i_on, i_float); }
+void sampler_birth()
+{
+    std::vector<uint64_t> cts(mcols.size(), 0);
+    for (size_t b = 0; b < sblocks.size() && b < m_last_ts.size(); b++)
+        for (size_t c = 0; c < sblocks[b].ncol && (int)c < m_nread[b]; c++) cts[sblocks[b].col0 + c] = m_last_ts[b];
+    dev_birth(d_smp, m_alias0, m_dt_ns, mcols, m_last, cts, {}, m_float);
+}
+void scope_birth()
+{
+    dev_birth(d_scope, i_alias0, s_img_dt_ns, icols, i_last, std::vector<uint64_t>(icols.size(), i_last_ts), i_on, i_float);
+}
 
 // publisher health: errors of the broker connection and the last one; `le` keeps the string alive
 void add_err_metrics(Batch &b, std::string &le)
@@ -424,7 +443,7 @@ void births()
     born = true;
     hal_born = false;
     if (!hpins.empty() && hal_all_ok()) hal_birth();   // else when every source reads (publisher)
-    if (s_chan >= 0) sampler_birth();
+    if (!sblocks.empty()) sampler_birth();
     if (!s_img_masters.empty()) scope_birth();
 }
 
@@ -1316,10 +1335,12 @@ void dev_flush(size_t dev, uint64_t alias0, std::vector<double> &last, uint64_t 
     if (born && natsConnection_Status(nc) == NATS_CONN_STATUS_CONNECTED) send(s_ddata[dev], b, true);
 }
 
-// The sampler FIFO -> DDATA of device sampler (hal2spb's scope thread). One reader per FIFO
-// (hal_stream): halsampler must not read the same channel.
-void sampler_main()
+// The sampler FIFO of block `bk` -> DDATA of device sampler (hal2spb's scope thread), its columns only. One
+// reader per FIFO (hal_stream): halsampler must not read the same channel.
+void sampler_main(size_t bk)
 {
+    int s_chan;
+    { std::lock_guard<std::mutex> g(mx); s_chan = sblocks[bk].chan; }
     hal_stream_t st;
     bool said = false;
     // the sampler may load after the node (HALFILEs after the task): wait for the component
@@ -1347,13 +1368,15 @@ void sampler_main()
     // read outside mx was mcols[c] of an empty vector (the node died in a Rebirth). reload refuses a file whose
     // scope rows differ (same_scope), so this copy stays the scope of the node for the thread's life.
     std::vector<double> scale;
+    std::vector<int> gi;                         // the device column index of each column of the block
     int batch;
     long dt_ns;
     bool as_float;
     {
         std::lock_guard<std::mutex> g(mx);
-        for (const SCol &c : mcols) scale.push_back(c.scale);
-        batch = m_batch; dt_ns = m_dt_ns; as_float = m_float;
+        const SBlock &sb = sblocks[bk];
+        for (size_t c = 0; c < sb.ncol; c++) { scale.push_back(mcols[sb.col0 + c].scale); gi.push_back((int)(sb.col0 + c)); }
+        batch = sb.batch; dt_ns = m_dt_ns; as_float = m_float;
     }
     int ncol = (int)scale.size() < ne ? (int)scale.size() : ne;
     // the FIFO holds an old tail (up to its depth) at attach: drop exactly what is queued now
@@ -1367,7 +1390,7 @@ void sampler_main()
     std::vector<double> col((size_t)batch * (size_t)(ncol > 0 ? ncol : 1));   // column-major
     std::vector<double> sent_last(ncol > 0 ? ncol : 1);
     std::vector<char> sent_ok(ncol > 0 ? ncol : 1, 0);
-    { std::lock_guard<std::mutex> g(mx); m_last.assign(ncol > 0 ? ncol : 0, 0.0); m_last_ts = 0; }
+    { std::lock_guard<std::mutex> g(mx); m_last_ts[bk] = 0; m_nread[bk] = ncol > 0 ? ncol : 0; }
     while (running) {
         int n = 0;
         while (n < batch && running) {
@@ -1393,8 +1416,8 @@ void sampler_main()
         uint64_t ts = (uint64_t)llround(t_first * 1000.0);
         std::lock_guard<std::mutex> g(mx);
         static const std::vector<char> all_on;
-        dev_flush(d_smp, m_alias0, m_last, m_last_ts, all_on, col, batch, n, ncol, ts, (uint64_t)llround(t_last * 1000.0),
-                  sent_last, sent_ok, as_float, nullptr);
+        dev_flush(d_smp, m_alias0, m_last, m_last_ts[bk], all_on, col, batch, n, ncol, ts, (uint64_t)llround(t_last * 1000.0),
+                  sent_last, sent_ok, as_float, &gi);
     }
     hal_stream_detach(&st);
 }
@@ -1721,22 +1744,40 @@ bool load_pins(const std::string &path)
                    || a == "spb_host_ttl_s" || a == "tag_ttl_s") {
             if (w.size() < 2 || !num(w[1], v) || v < 0) { bad(a + ": a number >= 0"); break; }
             if (a == "hz") { if (!(v > 0)) { bad("hz > 0"); break; } hal_period_s = 1.0 / v; }
-            else if (a == "sampler_channel") s_chan = (int)v;
-            else if (a == "sampler_batch") m_batch = (int)v;
-            else if (a == "sampler_dt_ns") m_dt_ns = (long)v;
+            else if (a == "sampler_channel") {
+                // a new block: the sampler_* rows below are its own; dt_ns / type - one for the device, checked row by row
+                for (const SBlock &o : sblocks) if (o.chan == (int)v) { bad("sampler_channel " + w[1] + " twice"); break; }
+                if (!good) break;
+                SBlock nb; nb.chan = (int)v; nb.col0 = mcols.size();
+                sblocks.push_back(nb);
+            }
+            else if ((a == "sampler_batch" || a == "sampler_dt_ns") && sblocks.empty()) { bad(a + " before sampler_channel"); break; }
+            else if (a == "sampler_batch") sblocks.back().batch = (int)v;
+            else if (a == "sampler_dt_ns") {
+                if (sblocks.size() > 1 && m_dt_ns != (long)v) { bad("sampler_dt_ns " + w[1] + ": another than the block above - one device, one dt_ns"); break; }
+                m_dt_ns = (long)v;
+            }
             else if (a == "scope_batch") i_batch = (int)v;
             else if (a == "spb_host_ttl_s") host_ttl_s = v;
             else if (a == "tag_ttl_s") tag_ttl_s = v;
             else keepalive_s = v;
         } else if (a == "sampler_type" || a == "scope_type") {
             if (w.size() < 2 || (w[1] != "double" && w[1] != "float")) { bad(a + " double|float"); break; }
+            if (a == "sampler_type") {
+                if (sblocks.empty()) { bad("sampler_type before sampler_channel"); break; }
+                if (sblocks.size() > 1 && m_float != (w[1] == "float")) { bad("sampler_type " + w[1] + ": another than the block above - one device, one type"); break; }
+            }
             (a == "scope_type" ? i_float : m_float) = w[1] == "float";
         } else if (a == "sampler_col") {
             size_t dot = w.size() < 2 ? std::string::npos : w[1].find('.');
             if (dot == std::string::npos) { bad("sampler_col <Key.chan> [scale]"); break; }
             double sc = 1.0;
             if (w.size() > 2 && !num(w[2], sc)) { bad("sampler_col " + w[1] + ": scale " + w[2]); break; }
-            mcols.push_back(SCol{w[1].substr(0, dot), w[1].substr(dot + 1), sc});
+            if (sblocks.empty()) { bad("sampler_col before sampler_channel"); break; }
+            SCol nc{w[1].substr(0, dot), w[1].substr(dot + 1), sc};
+            for (const SCol &o : mcols) if (o.key == nc.key && o.ch == nc.ch) { bad("sampler_col " + w[1] + " twice in the device"); break; }
+            if (!good) break;
+            mcols.push_back(nc); sblocks.back().ncol++;
         } else if (a == "scope_image") {
             if (w.size() != 3 || !num(w[2], v) || v < 1 || v != std::floor(v)) { bad("scope_image <master> <divider >= 1>"); break; }
             if (w[1].size() >= LCEC_IMAGE_NAME_LEN) { bad("scope_image " + w[1] + ": longer than an lcec name"); break; }
@@ -1802,11 +1843,11 @@ bool load_pins(const std::string &path)
             return false;
         }
     }
-    if (s_chan >= 0) {
-        if (mcols.empty() || m_batch <= 0 || m_dt_ns <= 0 || (int)mcols.size() > HAL_STREAM_MAX_PINS) {
-            say(true, "%s: NATS PINS %s: sampler_channel needs sampler_col (1..%d), sampler_batch > 0 and "
+    for (const SBlock &b : sblocks) {
+        if (!b.ncol || b.batch <= 0 || m_dt_ns <= 0 || (int)b.ncol > HAL_STREAM_MAX_PINS) {
+            say(true, "%s: NATS PINS %s: sampler_channel %d needs sampler_col (1..%d), sampler_batch > 0 and "
                 "sampler_dt_ns > 0 (the sampler thread period) - NATS publishing refused\n",
-                tag(), path.c_str(), HAL_STREAM_MAX_PINS);
+                tag(), path.c_str(), b.chan, HAL_STREAM_MAX_PINS);
             return false;
         }
     }
@@ -1834,7 +1875,8 @@ std::string env(const char *var)
 struct PinsSet {
     std::vector<HPin> hpins;
     double keepalive_s = 0, hal_period_s = 0, host_ttl_s = 0, tag_ttl_s = 0;
-    int s_chan = -1, m_batch = 0, i_batch = 0;
+    std::vector<SBlock> sblocks;
+    int i_batch = 0;
     long m_dt_ns = 0;
     bool m_float = false, i_float = false;
     std::vector<SCol> mcols, icols;
@@ -1858,14 +1900,17 @@ void swap_pins(PinsSet &p)                       // the globals <-> p, field by 
     p.tag_own_stand.swap(tag_own_stand); p.tag_ok_src.swap(tag_ok_src);
     std::swap(p.keepalive_s, keepalive_s); std::swap(p.hal_period_s, hal_period_s);
     std::swap(p.host_ttl_s, host_ttl_s); std::swap(p.tag_ttl_s, tag_ttl_s);
-    std::swap(p.s_chan, s_chan); std::swap(p.m_batch, m_batch); std::swap(p.m_dt_ns, m_dt_ns);
+    p.sblocks.swap(sblocks); std::swap(p.m_dt_ns, m_dt_ns);
     std::swap(p.m_float, m_float); std::swap(p.tag_ok_sig, tag_ok_sig);
     std::swap(p.host_ok_sig, host_ok_sig); p.host_ok_src.swap(host_ok_src);
 }
 bool same_scope(const PinsSet &o)
 {
-    if (o.s_chan != s_chan || o.m_batch != m_batch || o.m_dt_ns != m_dt_ns || o.m_float != m_float
+    if (o.sblocks.size() != sblocks.size() || o.m_dt_ns != m_dt_ns || o.m_float != m_float
         || o.mcols.size() != mcols.size()) return false;
+    for (size_t b = 0; b < sblocks.size(); b++)
+        if (o.sblocks[b].chan != sblocks[b].chan || o.sblocks[b].batch != sblocks[b].batch
+            || o.sblocks[b].col0 != sblocks[b].col0 || o.sblocks[b].ncol != sblocks[b].ncol) return false;
     for (size_t c = 0; c < mcols.size(); c++)
         if (o.mcols[c].key != mcols[c].key || o.mcols[c].ch != mcols[c].ch || o.mcols[c].scale != mcols[c].scale) return false;
     if (o.s_img_masters != s_img_masters || o.s_img_div != s_img_div || o.simgs.size() != simgs.size()
@@ -1882,7 +1927,7 @@ bool same_scope(const PinsSet &o)
 // false = refused (said).
 bool pins_check()
 {
-    if (s_chan >= 0 && hal_comp < 0) {
+    if (!sblocks.empty() && hal_comp < 0) {
         say(true, "%s: NATS PINS sampler_channel without a HAL component - publishing refused\n", tag());
         return false;
     }
@@ -2136,7 +2181,13 @@ int start(const Config &c, int hal_comp_id, Owner *owner)
     enabled = true;
     running = true;
     pub_thread = std::thread(publisher);
-    if (s_chan >= 0) sampler_thread = std::thread(sampler_main);
+    {
+        std::lock_guard<std::mutex> g(mx);
+        m_last.assign(mcols.size(), 0.0);
+        m_last_ts.assign(sblocks.size(), 0);
+        m_nread.assign(sblocks.size(), 0);
+    }
+    for (size_t b = 0; b < sblocks.size(); b++) sampler_threads.emplace_back(sampler_main, b);
     for (const std::string &m : s_img_masters) img_threads.emplace_back(image_main, m);
     for (const HPin &p : hpins)
         if (p.out) say(false, "%s: NATS hal out %s (%s %s) <- %s%s\n", tag(), p.metric.c_str(), p.sig ? "signal" : "pin",
@@ -2151,9 +2202,9 @@ int start(const Config &c, int hal_comp_id, Owner *owner)
     if (!tends.empty()) say(false, "%s: NATS tags: KV CELL, writer TTL %g s%s%s\n", tag(), tag_ttl_s,
                             tag_own_stand.empty() ? "" : (", alive " + tag_alive[tag_own_stand]).c_str(),
                             tag_ok_src.empty() ? "" : (", tag_ok -> " + tag_ok_src).c_str());
-    say(false, "%s: NATS %s%s as Sparkplug node %s/%s, %zu own metrics, %zu hal, %zu sampler + %zu scope columns, snapshot on %s\n",
+    say(false, "%s: NATS %s%s as Sparkplug node %s/%s, %zu own metrics, %zu hal, %zu sampler (%zu channels) + %zu scope columns, snapshot on %s\n",
         tag(), cfg.url.c_str(), cfg.user.empty() ? "" : " (user)", cfg.group.c_str(), cfg.node.c_str(),
-        own ? own->aliases() : (size_t)0, hpins.size(), mcols.size(), icols.size(), s_snapshot.c_str());
+        own ? own->aliases() : (size_t)0, hpins.size(), mcols.size(), sblocks.size(), icols.size(), s_snapshot.c_str());
     return 0;
 }
 
@@ -2165,7 +2216,8 @@ void stop()
     enabled = false;
     running = false;
     if (pub_thread.joinable()) pub_thread.join();
-    if (sampler_thread.joinable()) sampler_thread.join();
+    for (std::thread &t : sampler_threads) if (t.joinable()) t.join();
+    sampler_threads.clear();
     for (std::thread &t : img_threads) if (t.joinable()) t.join();
     img_threads.clear();
     {
