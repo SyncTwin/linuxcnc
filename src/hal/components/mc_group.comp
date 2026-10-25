@@ -578,7 +578,8 @@ FUNCTION(_) {
 
     /* derived state */
     if (!enable) {
-        if (run) { int was_move = run == RUN_MOVE; end_run(__comp_inst, 1); if (was_move) fire = 2; }   /* members halt */
+        /* members halt; a reset of the members is no motion — it runs on (PackML Clearing disables the group) */
+        if (run && run != RUN_RESET) { int was_move = run == RUN_MOVE; end_run(__comp_inst, 1); if (was_move) fire = 2; }
         member_sync_set(0); lin = 0;   /* a Linear move: the members decelerate at their maxa */
         if (q_valid) { aborted_id_set(q_id); q_valid = 0; }
         state_set(GS_DISABLED);
@@ -628,7 +629,12 @@ FUNCTION(_) {
         }
     } else if (reset_edge) {
         if (state != GS_ERROR_STOP) {
-            if (state == GS_DISABLED || state == GS_STANDBY) { done_set(1); term_shown = 0; done_id_set(seq); }
+            /* a member in ErrorStop is reset through the group (member-reset is the one writer of every member's
+               reset): Done only when they stand clear — never Done while a member still holds its error */
+            if ((state == GS_DISABLED || state == GS_STANDBY) && any_axis_err) {
+                issue_members(__comp_inst, RUN_RESET, seq, 1); busy_set(1); active_set(1);
+            }
+            else if (state == GS_DISABLED || state == GS_STANDBY) { done_set(1); term_shown = 0; done_id_set(seq); }
             else cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;
         } else if (!any_axis_err) {
             grp_err = 0; state_set(GS_STANDBY); done_set(1); term_shown = 0; done_id_set(seq);
