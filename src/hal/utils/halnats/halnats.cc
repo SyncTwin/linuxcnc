@@ -35,7 +35,8 @@
 *            hal_stream, as halsampler; one reader per FIFO, one thread per block; columns in the guest's
 *            units - joint pos-fb, vel, ...). Every block is under the ONE device sampler (its columns
 *            one after another, one dt_ns and one type for all blocks: the base's servo thread; a column
-*            name once in the device). A FIFO is attached once the sampler component exists, the tail
+*            name once in the device). A FIFO is attached once the sampler component exists (again, with a
+*            line in the log, after the component is unloaded or reloaded or the FIFO header changes), the tail
 *            queued at attach dropped, then batches of sampler_batch rows as one DDATA of the block's
 *            DoubleArray/FloatArray columns (packed LE) stamped with the first row's time; a column
 *            constant at its last sent value is left out (report by exception). The file is the same
@@ -1335,91 +1336,127 @@ void dev_flush(size_t dev, uint64_t alias0, std::vector<double> &last, uint64_t 
     if (born && natsConnection_Status(nc) == NATS_CONN_STATUS_CONNECTED) send(s_ddata[dev], b, true);
 }
 
+// hal_stream_attach / _detach go through rtapi_shmem_new / _delete, whose handle table (shmem_array of
+// rtapi/uspace_common.h) has no lock, and the block threads start together: one attach / detach at a time.
+std::mutex shm_mx;
+
+// Why the attached FIFO is not the sampler's any more, or nullptr. The header is hal_stream_create's, written
+// once per load: a depth or a column count other than at attach (0 - a zeroed header) is not a stream; another
+// sampler component (an unload, a load) writes a FIFO of its own. Cheap (shared memory) except the component
+// lookup, done every `comp_too`.
+const char *fifo_gone(hal_stream_t &st, int ne, unsigned depth, int comp_id, bool comp_too)
+{
+    if (hal_stream_element_count(&st) != ne || hal_stream_maxdepth(&st) != depth) return "FIFO header changed";
+    if (!comp_too) return nullptr;
+    hal_query_t q;
+    memset(&q, 0, sizeof q);
+    if (hal_comp_by_name("sampler", &q) != 0) return "sampler component gone";
+    if (q.comp.comp_id != comp_id) return "sampler component reloaded";
+    return nullptr;
+}
+
 // The sampler FIFO of block `bk` -> DDATA of device sampler (hal2spb's scope thread), its columns only. One
-// reader per FIFO (hal_stream): halsampler must not read the same channel.
+// reader per FIFO (hal_stream): halsampler must not read the same channel. The reader follows the writer: a
+// FIFO that stops being the sampler's (fifo_gone) is detached - our attach no longer keeps a dead segment -
+// and attached again, one line in the log; a dead FIFO was read at full speed under mx (no DBIRTH of hal).
 void sampler_main(size_t bk)
 {
     int s_chan;
     { std::lock_guard<std::mutex> g(mx); s_chan = sblocks[bk].chan; }
     hal_stream_t st;
     bool said = false;
-    // the sampler may load after the node (HALFILEs after the task): wait for the component
-    // before attaching (a quiet probe - hal_stream_attach logs every failure)
-    // ПРЕДПОЛОЖЕНИЕ, не замер: a 1 s poll is fine for a FIFO that exists from HAL load on
-    for (;;) {
-        if (!running) return;
-        hal_query_t q;
-        memset(&q, 0, sizeof q);
-        if (hal_comp_by_name("sampler", &q) == 0) {
-            int r = hal_stream_attach(&st, hal_comp, SAMPLER_SHMEM_KEY + s_chan, nullptr);
-            if (r >= 0) break;
-            if (!said) say(true, "%s: NATS sampler: hal_stream_attach(channel %d): %s - retrying\n", tag(), s_chan, strerror(-r));
-            said = true;
-        } else if (!said) {
-            say(false, "%s: NATS sampler: no sampler component yet - waiting\n", tag());
-            said = true;
-        }
-        struct timespec w = {1, 0};
-        nanosleep(&w, nullptr);
-    }
-    int ne = hal_stream_element_count(&st);
-    // The scope rows, read ONCE under mx: a Rebirth (reload, publisher thread, under mx) swaps the PINS globals
-    // out and parses the file again, so mcols / m_batch / m_dt_ns are empty or half-filled for that while - a
-    // read outside mx was mcols[c] of an empty vector (the node died in a Rebirth). reload refuses a file whose
-    // scope rows differ (same_scope), so this copy stays the scope of the node for the thread's life.
-    std::vector<double> scale;
-    std::vector<int> gi;                         // the device column index of each column of the block
-    int batch;
-    long dt_ns;
-    bool as_float;
-    {
-        std::lock_guard<std::mutex> g(mx);
-        const SBlock &sb = sblocks[bk];
-        for (size_t c = 0; c < sb.ncol; c++) { scale.push_back(mcols[sb.col0 + c].scale); gi.push_back((int)(sb.col0 + c)); }
-        batch = sb.batch; dt_ns = m_dt_ns; as_float = m_float;
-    }
-    int ncol = (int)scale.size() < ne ? (int)scale.size() : ne;
-    // the FIFO holds an old tail (up to its depth) at attach: drop exactly what is queued now
-    int stale = hal_stream_depth(&st), dropped_rows = 0;
-    std::vector<hal_stream_data_u> row(ne > 0 ? ne : 1);
-    unsigned sn;
-    while (dropped_rows < stale && hal_stream_read(&st, row.data(), &sn) == 0) dropped_rows++;
-    say(false, "%s: NATS sampler: sampler channel %d, %d columns (%d in the conf), dropped stale tail %d\n",
-        tag(), s_chan, ne, (int)scale.size(), dropped_rows);
-    double dt = dt_ns / 1e9;
-    std::vector<double> col((size_t)batch * (size_t)(ncol > 0 ? ncol : 1));   // column-major
-    std::vector<double> sent_last(ncol > 0 ? ncol : 1);
-    std::vector<char> sent_ok(ncol > 0 ? ncol : 1, 0);
-    { std::lock_guard<std::mutex> g(mx); m_last_ts[bk] = 0; m_nread[bk] = ncol > 0 ? ncol : 0; }
     while (running) {
-        int n = 0;
-        while (n < batch && running) {
-            if (!hal_stream_readable(&st)) { struct timespec w = {0, (long)(dt_ns > 0 ? dt_ns : 1000000)}; nanosleep(&w, nullptr); continue; }
-            if (hal_stream_read(&st, row.data(), &sn) < 0) break;
-            for (int c = 0; c < ncol; c++) {
-                double x;
-                switch (hal_stream_element_type(&st, c)) {
-                case HAL_BOOL: x = row[c].b; break;
-                case HAL_SINT: x = (double)row[c].s; break;
-                case HAL_UINT: x = (double)row[c].u; break;
-                default: x = row[c].f; break;
-                }
-                col[(size_t)c * batch + n] = x * scale[c];
+        // the sampler may load after the node (HALFILEs after the task): wait for the component
+        // before attaching (a quiet probe - hal_stream_attach logs every failure)
+        // ПРЕДПОЛОЖЕНИЕ, не замер: a 1 s poll is fine for a FIFO that exists from HAL load on
+        int comp_id = -1;
+        for (;;) {
+            if (!running) return;
+            hal_query_t q;
+            memset(&q, 0, sizeof q);
+            if (hal_comp_by_name("sampler", &q) == 0) {
+                int r;
+                { std::lock_guard<std::mutex> g(shm_mx); r = hal_stream_attach(&st, hal_comp, SAMPLER_SHMEM_KEY + s_chan, nullptr); }
+                if (r >= 0 && hal_stream_element_count(&st) > 0 && hal_stream_maxdepth(&st) > 0) { comp_id = q.comp.comp_id; break; }
+                if (r >= 0) { std::lock_guard<std::mutex> g(shm_mx); hal_stream_detach(&st); r = -EINVAL; }
+                if (!said) say(true, "%s: NATS sampler: hal_stream_attach(channel %d): %s - retrying\n", tag(), s_chan, strerror(-r));
+                said = true;
+            } else if (!said) {
+                say(false, "%s: NATS sampler: no sampler component yet - waiting\n", tag());
+                said = true;
             }
-            n++;
+            struct timespec w = {1, 0};
+            nanosleep(&w, nullptr);
         }
-        if (!n) continue;
-        // time of the LAST row = now minus what is still queued behind it
-        struct timespec now; clock_gettime(CLOCK_REALTIME, &now);
-        double t_last = now.tv_sec + now.tv_nsec * 1e-9 - hal_stream_depth(&st) * dt;
-        double t_first = t_last - (n - 1) * dt;
-        uint64_t ts = (uint64_t)llround(t_first * 1000.0);
-        std::lock_guard<std::mutex> g(mx);
-        static const std::vector<char> all_on;
-        dev_flush(d_smp, m_alias0, m_last, m_last_ts[bk], all_on, col, batch, n, ncol, ts, (uint64_t)llround(t_last * 1000.0),
-                  sent_last, sent_ok, as_float, &gi);
+        said = false;
+        int ne = hal_stream_element_count(&st);
+        unsigned depth = hal_stream_maxdepth(&st);
+        // The scope rows, read ONCE under mx: a Rebirth (reload, publisher thread, under mx) swaps the PINS globals
+        // out and parses the file again, so mcols / m_batch / m_dt_ns are empty or half-filled for that while - a
+        // read outside mx was mcols[c] of an empty vector (the node died in a Rebirth). reload refuses a file whose
+        // scope rows differ (same_scope), so this copy stays the scope of the node for the thread's life.
+        std::vector<double> scale;
+        std::vector<int> gi;                         // the device column index of each column of the block
+        int batch;
+        long dt_ns;
+        bool as_float;
+        {
+            std::lock_guard<std::mutex> g(mx);
+            const SBlock &sb = sblocks[bk];
+            for (size_t c = 0; c < sb.ncol; c++) { scale.push_back(mcols[sb.col0 + c].scale); gi.push_back((int)(sb.col0 + c)); }
+            batch = sb.batch; dt_ns = m_dt_ns; as_float = m_float;
+        }
+        int ncol = (int)scale.size() < ne ? (int)scale.size() : ne;
+        // the FIFO holds an old tail (up to its depth) at attach: drop exactly what is queued now
+        int stale = hal_stream_depth(&st), dropped_rows = 0;
+        std::vector<hal_stream_data_u> row(ne > 0 ? ne : 1);
+        unsigned sn;
+        while (dropped_rows < stale && hal_stream_read(&st, row.data(), &sn) == 0) dropped_rows++;
+        say(false, "%s: NATS sampler: sampler channel %d, %d columns (%d in the conf), dropped stale tail %d\n",
+            tag(), s_chan, ne, (int)scale.size(), dropped_rows);
+        double dt = dt_ns / 1e9;
+        std::vector<double> col((size_t)batch * (size_t)(ncol > 0 ? ncol : 1));   // column-major
+        std::vector<double> sent_last(ncol > 0 ? ncol : 1);
+        std::vector<char> sent_ok(ncol > 0 ? ncol : 1, 0);
+        { std::lock_guard<std::mutex> g(mx); m_last_ts[bk] = 0; m_nread[bk] = ncol > 0 ? ncol : 0; }
+        // ПРЕДПОЛОЖЕНИЕ, не замер: the component looked up once a second, as the attach poll above
+        struct timespec t_comp; clock_gettime(CLOCK_MONOTONIC, &t_comp);
+        const char *gone = nullptr;
+        while (running && !gone) {
+            int n = 0;
+            while (n < batch && running) {
+                struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+                bool comp_too = now.tv_sec > t_comp.tv_sec;
+                if (comp_too) t_comp = now;
+                if ((gone = fifo_gone(st, ne, depth, comp_id, comp_too))) break;
+                if (!hal_stream_readable(&st)) { struct timespec w = {0, (long)(dt_ns > 0 ? dt_ns : 1000000)}; nanosleep(&w, nullptr); continue; }
+                if (hal_stream_read(&st, row.data(), &sn) < 0) { gone = "FIFO read failed"; break; }
+                for (int c = 0; c < ncol; c++) {
+                    double x;
+                    switch (hal_stream_element_type(&st, c)) {
+                    case HAL_BOOL: x = row[c].b; break;
+                    case HAL_SINT: x = (double)row[c].s; break;
+                    case HAL_UINT: x = (double)row[c].u; break;
+                    default: x = row[c].f; break;
+                    }
+                    col[(size_t)c * batch + n] = x * scale[c];
+                }
+                n++;
+            }
+            if (!n || gone) continue;   // a part batch of a FIFO gone is not sent: its rows are not the sampler's
+            // time of the LAST row = now minus what is still queued behind it
+            struct timespec now; clock_gettime(CLOCK_REALTIME, &now);
+            double t_last = now.tv_sec + now.tv_nsec * 1e-9 - hal_stream_depth(&st) * dt;
+            double t_first = t_last - (n - 1) * dt;
+            uint64_t ts = (uint64_t)llround(t_first * 1000.0);
+            std::lock_guard<std::mutex> g(mx);
+            static const std::vector<char> all_on;
+            dev_flush(d_smp, m_alias0, m_last, m_last_ts[bk], all_on, col, batch, n, ncol, ts, (uint64_t)llround(t_last * 1000.0),
+                      sent_last, sent_ok, as_float, &gi);
+        }
+        { std::lock_guard<std::mutex> g(shm_mx); hal_stream_detach(&st); }
+        if (gone) say(true, "%s: NATS sampler: channel %d: %s - re-attaching\n", tag(), s_chan, gone);
     }
-    hal_stream_detach(&st);
 }
 
 // The lcec process image ring -> DDATA of device scope (scope_image). Any number of readers: the bus
