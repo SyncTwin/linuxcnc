@@ -21,10 +21,14 @@ MEMBERS: four *mc_axis*(9) instances.  The group owns their motion inputs:
 joint-cmd-N -> mc_axis.N.position, joint-vel-N -> .velocity,
 joint-acc-N -> .acceleration, member-execute / member-halt / member-reset
 -> .execute / .halt / .reset of every member (one period pulses).  It reads
-.actual-position (joint-fb-N), .state, .command-id, .done-id, .aborted-id,
+.actual-position (joint-fb-N), .commanded-position (joint-set-N), .state, .command-id, .done-id, .aborted-id,
 .failed-id and the limits the axis is given (joint-maxv/maxa/min/max-N, the
 same signals as the axis's maxv/maxa/min-limit/max-limit).  MC_Power stays
-per axis: the group never powers a member.
+per axis: the group never powers a member.  A move starts from the members'
+setpoints (commanded-position, mcSetValue), not their actual positions: a
+member under load stands off its setpoint by its following error, and a
+synchronized step from the actual position would be that whole error in one
+period (mc_axis error 10 when it is over maxv*dt).
 
 COMMANDS (rising edges, numbered on command-id like mc_axis; resolved on
 done-id / aborted-id / failed-id): *execute* = a move to position-x..c
@@ -115,7 +119,8 @@ pin in real position_a "MC_POSITION.A, deg (ACS: member 3)";
 pin in real position_b "MC_POSITION.B, deg: must be 0";
 pin in real position_c "MC_POSITION.C, deg (ACS: must be 0)";
 
-pin in real joint_fb_#[4] "mc_axis.N.actual-position";
+pin in real joint_fb_#[4] "mc_axis.N.actual-position: MC_GroupReadActualPosition (actual-x..c)";
+pin in real joint_set_#[4] "mc_axis.N.commanded-position (mcSetValue): where a move of the group starts";
 pin in real joint_maxv_#[4] "= mc_axis.N.maxv";
 pin in real joint_maxa_#[4] "= mc_axis.N.maxa";
 pin in real joint_min_#[4] "= mc_axis.N.min-limit";
@@ -306,13 +311,13 @@ static int resolve(struct __comp_state *__comp_inst, const double *seed, double 
     return best_d < 1e300 ? 0 : e;
 }
 
-/* Synchronized Direct move to t[4] from the actual member positions: one normalized trapezoid for all, its peak
+/* Synchronized Direct move to t[4] from the member setpoints (each member plans from its own pos-cmd): one normalized trapezoid for all, its peak
  * scaled by f (direct-vel-factor of the move). */
 static void issue_move(struct __comp_state *__comp_inst, const double *t, int id, double f) {
     double V = 1e300, A = 1e300, dd;
     int i;
     for (i = 0; i < 4; i++) {
-        dd = fabs(t[i] - joint_fb(i));
+        dd = fabs(t[i] - joint_set(i));
         if (dd > 0.0) {
             if (joint_maxv(i) / dd < V) V = joint_maxv(i) / dd;
             if (joint_maxa(i) / dd < A) A = joint_maxa(i) / dd;
@@ -320,7 +325,7 @@ static void issue_move(struct __comp_state *__comp_inst, const double *t, int id
     }
     V *= f;
     for (i = 0; i < 4; i++) {
-        dd = fabs(t[i] - joint_fb(i));
+        dd = fabs(t[i] - joint_set(i));
         tj[i] = t[i];
         joint_cmd_set(i, t[i]);
         /* a member that stays: a null move at its limits (mc_axis refuses velocity 0) */
@@ -374,8 +379,10 @@ static double mech_acc(struct __comp_state *__comp_inst) {
     return best;
 }
 
-/* Linear move from the members' actual positions to p1 (X Y Z C), member targets t (resolved): the members enter
- * SynchronizedMotion first; t is the running move's end (tj), the start of a move buffered after it. */
+/* Linear move from the members' setpoints to p1 (X Y Z C), member targets t (resolved): the members enter
+ * SynchronizedMotion first; t is the running move's end (tj), the start of a move buffered after it.  The path
+ * starts at the setpoints (commanded-position), the value mc_axis checks each synchronized step against: from the
+ * actual position the first step would be the members' following error (a carried load: Perekladka, pallet). */
 static void start_linear(struct __comp_state *__comp_inst, const double *p1, const double *t, double v, double a, double d, int id) {
     struct geom gi;
     double jf[EMCMOT_MAX_JOINTS] = {0}, dx, dy, dz;
@@ -383,7 +390,7 @@ static void start_linear(struct __comp_state *__comp_inst, const double *p1, con
     KINEMATICS_FORWARD_FLAGS ff = 0;
     KINEMATICS_INVERSE_FLAGS fi = 0;
     int i;
-    for (i = 0; i < 4; i++) { qc[i] = jf[i] = joint_fb(i); joint_sync_set(i, qc[i]); lp1[i] = p1[i]; tj[i] = t[i]; }
+    for (i = 0; i < 4; i++) { qc[i] = jf[i] = joint_set(i); joint_sync_set(i, qc[i]); lp1[i] = p1[i]; tj[i] = t[i]; }
     use_geometry(__comp_inst, &gi);
     kinematicsForward(jf, &p, &ff, &fi);
     l_flags = fi;
@@ -604,7 +611,7 @@ FUNCTION(_) {
         } else if (state == GS_MOVING && (mode == 1 || run == RUN_LIN)) {
             cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;   /* a Linear move neither aborts nor is aborted by a move */
         } else {
-            for (i = 0; i < 4; i++) seed[i] = joint_fb(i);
+            for (i = 0; i < 4; i++) seed[i] = joint_set(i);
             if ((e = resolve(__comp_inst, seed, t))) cmd_err = e;
             else {
                 if (run) end_run(__comp_inst, 1);
