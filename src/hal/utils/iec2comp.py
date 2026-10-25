@@ -330,7 +330,8 @@ def render(p: Program, comp: str, thread: str = DEFAULT_THREAD, hooks: Hooks | N
                  f"pin in bit ax{i}_busy;", f"pin in bit ax{i}_in_velocity;", f"pin in s32 ax{i}_error_id;"]
         pins += [f'pin out bit ax{i}_reset "{doc(f"ax{i}_reset", f"mc-axis.{i}.reset: held while MC_Reset.Execute")}";',
                  f'pin in s32 ax{i}_axis_error_id "{doc(f"ax{i}_axis_error_id", f"mc-axis.{i}.axis-error-id: MC_ReadAxisError")}";',
-                 f'pin in float ax{i}_actual_position "{doc(f"ax{i}_actual_position", f"mc-axis.{i}.actual-position: MC_ReadActualPosition")}";']
+                 f'pin in float ax{i}_actual_position "{doc(f"ax{i}_actual_position", f"mc-axis.{i}.actual-position: MC_ReadActualPosition")}";',
+                 f'pin in float ax{i}_torque_fb "{doc(f"ax{i}_torque_fb", f"mc-axis.{i}.torque-fb: MC_ReadActualTorque (0x6077, per mille of rated)")}";']
         if p.power:
             pins += [f'pin out bit ax{i}_power "{doc(f"ax{i}_power", "MC_Power.Enable while the program runs")}";',
                      f'pin in s32 ax{i}_state "mc-axis.{i}.state: MC_Power.Status (AxisState, 0 Disabled)";']
@@ -370,7 +371,8 @@ def render(p: Program, comp: str, thread: str = DEFAULT_THREAD, hooks: Hooks | N
                     f"iec_ax[{i}].in_vel = ax{i}_in_velocity; iec_ax[{i}].error_id = ax{i}_error_id;\n" for i in ax)
     if p.power:
         c_in += "".join(f"    iec_ax[{i}].state = ax{i}_state;\n" for i in ax)
-    c_in += "".join(f"    iec_ax[{i}].axis_error_id = ax{i}_axis_error_id; iec_ax[{i}].act_pos = ax{i}_actual_position;\n" for i in ax)
+    c_in += "".join(f"    iec_ax[{i}].axis_error_id = ax{i}_axis_error_id; iec_ax[{i}].act_pos = ax{i}_actual_position; "
+                    f"iec_ax[{i}].act_trq = ax{i}_torque_fb;\n" for i in ax)
     if p.gear:   # mc-gear.N answers as mc-axis.N does (command numbers, busy, in-gear as in-velocity)
         c_in += "".join(f"    iec_gr[{i}].cmd_id = ax{i}_gear_command_id; iec_gr[{i}].done_id = ax{i}_gear_done_id; "
                         f"iec_gr[{i}].aborted_id = ax{i}_gear_aborted_id; iec_gr[{i}].failed_id = ax{i}_gear_failed_id; "
@@ -429,7 +431,7 @@ IEC_UDINT iec_tick;
 {loc_decl}
 /* setpos: the pending command is MC_SetPosition (issued on `set`, mode 0/1 = absolute/relative) */
 struct iec_axis {{ int pend, exec, halt_pend, halt, mode, resume, reset_pend, reset, reset_hold, setpos, set; IEC_REAL pos, vel, acc, dec, jerk;
-                  IEC_UDINT *mv_owner, *halt_owner, *reset_owner; IEC_REAL act_pos;
+                  IEC_UDINT *mv_owner, *halt_owner, *reset_owner; IEC_REAL act_pos, act_trq;
                   unsigned cmd_id, done_id, aborted_id, failed_id; int busy, in_vel, error_id, axis_error_id, power, state, master; }};
 static struct iec_axis iec_ax[{n_ax}];
 static struct iec_axis iec_gr[{n_ax}];   /* mc-gear.N of slave N: the same command protocol as mc-axis.N */
@@ -495,6 +497,11 @@ int iec_axis_position(int a, IEC_REAL *pos) {{
     if (a < 0 || a >= {n_ax}) return 0;
     *pos = iec_ax[a].act_pos; return 1;
 }}
+/* MC_ReadActualTorque: the drive's torque actual 0x6077, per mille of rated (mc-axis.N.torque-fb, read at the start of this period) */
+int iec_axis_torque(int a, IEC_REAL *trq) {{
+    if (a < 0 || a >= {n_ax}) return 0;
+    *trq = iec_ax[a].act_trq; return 1;
+}}
 /* MC_Power: Enable -> axN-power, Status = axis not Disabled (AxisState 0) */
 int iec_axis_power(int a, IEC_BOOL en, IEC_BOOL *on) {{
     if (a < 0 || a >= {n_ax}) return 0;
@@ -533,6 +540,7 @@ FUNCTION(_) {{
         hal.append(f"net {comp}-ax{i}-reset {inst}.ax{i}-reset => mc-axis.{i}.reset")
         hal.append(f"net {comp}-ax{i}-axis-error-id mc-axis.{i}.axis-error-id => {inst}.ax{i}-axis-error-id")
         hal.append(f"net {comp}-ax{i}-actual-position mc-axis.{i}.actual-position => {inst}.ax{i}-actual-position")
+        hal.append(f"net {comp}-ax{i}-torque-fb mc-axis.{i}.torque-fb => {inst}.ax{i}-torque-fb")
         if h.axis_hal:
             hal += h.axis_hal(i)
         if p.power:

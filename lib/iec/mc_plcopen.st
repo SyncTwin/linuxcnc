@@ -187,6 +187,25 @@ FUNCTION_BLOCK MC_ReadActualPosition
   }}
 END_FUNCTION_BLOCK
 
+(* MC_ReadActualTorque (PLCopen TC2 Motion Control Part 1 v2.0, 2011, administrative FB; Enable FB):
+   Torque = mc-axis.N.torque-fb — the drive's torque actual value, object 0x6077 of CiA 402 as the drive reports it:
+   per mille (0.1 %) of the rated torque 0x6076, signed, no scaling on the way (a live drive through lcec, a
+   virtual one through the ESC responder of the box, the same signal and unit). Read every scan while Enable;
+   Valid/Busy follow Enable; Error/ErrorID 1 only for an axis this program does not drive (as MC_ReadActualPosition).
+   Torque keeps its last value when Enable falls. *)
+FUNCTION_BLOCK MC_ReadActualTorque
+  VAR_IN_OUT Axis : AXIS_REF; END_VAR
+  VAR_INPUT Enable : BOOL; END_VAR
+  VAR_OUTPUT Valid : BOOL; Busy : BOOL; Error : BOOL; ErrorID : WORD; Torque : REAL; END_VAR
+  {{
+    extern int iec_axis_torque(int, IEC_REAL *);
+    IEC_BOOL en = GetFbVar(ENABLE), ok = 0; IEC_REAL trq = GetFbVar(TORQUE);
+    if (en) ok = iec_axis_torque(GetFbVar(AXIS, .AXISNO.value), &trq);
+    SetFbVar(VALID, en && ok); SetFbVar(BUSY, en && ok); SetFbVar(ERROR, en && !ok); SetFbVar(ERRORID, en && !ok ? 1 : 0);
+    SetFbVar(TORQUE, trq);
+  }}
+END_FUNCTION_BLOCK
+
 (* MC_GearIn (P1 § 4.5 p. 94): Slave runs at RatioNumerator / RatioDenominator x Master (mc-gear.<Slave>, mc_gear(9)).
    The slave ramps in with Acceleration/Deceleration/Jerk (0 = the slave's maxa / = Acceleration / none), the distance
    lost ramping is not caught up (note 1); InGear when coupled; a new GearIn changes the ratio on the fly (note 2).
