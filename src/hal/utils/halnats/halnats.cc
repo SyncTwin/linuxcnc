@@ -434,6 +434,7 @@ void births()
     m1.value_case = HN_V(BOOLEAN_VALUE); m1.boolean_value = 0;
     std::string le;
     add_err_metrics(nb, le);
+    if (own) own->node_birth(nb);
     send(s_nbirth, nb, true);
     if (own)
         for (size_t d = 0; d < own->devices().size(); d++) {
@@ -1287,11 +1288,12 @@ void publisher()
                             if (!b.ms.empty()) send(s_ddata[d], b, true);
                         }
                     if (scope_reborn.exchange(false)) scope_birth();
-                    if (errw.total() != errs_sent) {     // NDATA by exception: only when the count moved
+                    {                                    // NDATA by exception: only what moved
                         Batch b;
                         std::string le;
-                        add_err_metrics(b, le);
-                        send(s_ndata, b, true);
+                        if (errw.total() != errs_sent) add_err_metrics(b, le);
+                        if (own) own->node_data(b);
+                        if (!b.ms.empty()) send(s_ndata, b, true);
                     }
                     if (!hpins.empty()) {
                         if (!hal_born) { if (hal_all_ok()) hal_birth(); }

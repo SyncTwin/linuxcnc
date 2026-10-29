@@ -71,6 +71,11 @@ struct Owner {
     // device: two devices = two threads). Must not block; the payload is freed after the call.
     virtual bool takes_commands(size_t /*dev*/) const { return false; }
     virtual void command(size_t /*dev*/, const SparkplugB__Payload * /*pl*/) {}
+    // The owner's node-level metrics (NBIRTH / NDATA of the node itself, named "<group>/<metric>", no
+    // alias, as publisher/errors): node_birth adds the current values and marks them sent, node_data only
+    // the ones changed since (nothing changed = nothing added, no NDATA goes).
+    virtual void node_birth(Batch & /*b*/) {}
+    virtual void node_data(Batch & /*b*/) {}
 };
 
 typedef void (*LogFn)(bool error, const char *line);

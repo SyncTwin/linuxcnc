@@ -50,6 +50,7 @@
 #include "nml_intf/emc_nml.hh"
 #include "motion/usrmotintf.h"            // usrmotReadEmcmotConfig(): num_dio / num_aio
 #include "motion/motion.h"
+#include "tp/tp_types.h"                  // TP_VEL_EPSILON
 
 using halnats::Val;
 using halnats::Metric;
@@ -107,6 +108,13 @@ std::vector<std::string> smirror;                // under the node's lock
 std::vector<uint64_t> smirror_ts;
 std::vector<char> smirror_ok, sdirty;
 uint64_t str_alias0 = 0;                         // aliases: status 1..N, then strings
+
+// node metric cell/moving (NBIRTH + NDATA of the node, by exception): the cell is in a process of motion -
+// a program's or MDI's coordinated move, a jog, a homing. The task thread folds it each cycle into one word
+// (ts_ms << 1 | moving; 0 = not computed yet), the publisher sends it only when the value turns.
+std::atomic<uint64_t> moving_word{0};
+int moving_sent = -1;                            // publisher side (under the node's lock): -1 = none sent
+int moving_joints = 0;                           // the published joints (taskNatsInit)
 
 Val I(int64_t i) { Val v; v.i = i; return v; }
 Val R(double d) { Val v; v.d = d; return v; }
@@ -591,6 +599,13 @@ void ev_metric(Batch &b, int k, const Event &e, bool named, bool prefixed)
     else if (k == EA_STATE) halnats::set_value(&m, dt, I(e.state));
     else { m.value_case = HN_V(STRING_VALUE); m.string_value = (char *)e.text; }
 }
+void moving_metric(Batch &b, uint64_t w)
+{
+    Metric &m = b.add("cell/moving", 0, DT_(Boolean), w >> 1);
+    halnats::set_value(&m, DT_(Boolean), I((int64_t)(w & 1)));
+    moving_sent = (int)(w & 1);
+}
+
 void ev_last_all(Batch &b, bool named, bool prefixed)
 {
     ev_metric(b, EA_SERIAL, e_last_cmd, named, prefixed);
@@ -641,7 +656,7 @@ struct TaskStatus : halnats::Owner {
     {
         for (char ok : mirror_ok) if (!ok) return false;
         for (char ok : smirror_ok) if (!ok) return false;
-        return true;
+        return moving_word.load(std::memory_order_acquire) != 0;
     }
     void birth(size_t d, Batch &b) override
     {
@@ -650,6 +665,16 @@ struct TaskStatus : halnats::Owner {
         for (size_t k = 0; k < sdefs.size(); k++)
             if ((size_t)sdefs[k].dev == d && smirror_ok[k]) { str_metric(b, k, true, false); sdirty[k] = 0; }
         if (d == D_TASK) { take_events(); ev_last_all(b, true, false); }
+    }
+    void node_birth(Batch &b) override
+    {
+        uint64_t w = moving_word.load(std::memory_order_acquire);
+        if (w) moving_metric(b, w);
+    }
+    void node_data(Batch &b) override
+    {
+        uint64_t w = moving_word.load(std::memory_order_acquire);
+        if (w && (int)(w & 1) != moving_sent) moving_metric(b, w);
     }
     // fold the events into the last values (a birth carries those) and forget them
     void take_events()
@@ -729,6 +754,7 @@ int taskNatsInit(const char *inifile, int joints, double task_cycle_time, int ha
         log_line(true, "task: NATS - motion's config not read, motion synch_di/do and analog_input/output not published\n");
 
     build_defs(joints, spindles, dio, aio);
+    moving_joints = joints;
     size_t n = defs.size();
     size_t ns = sdefs.size();
     sprev.assign(ns, std::string()); sprev_ok.assign(ns, 0);
@@ -871,6 +897,13 @@ void taskNatsCycle(const EMC_STAT *stat)
         sslot[k] = v; sslot_ts[k] = ts; sslot_new[k] = 1;
         sprev[k] = v; sprev_ok[k] = 1;
     }
+    // cell/moving: motion's own "not in position" (control.c: a free_tp active in jog/home, the coord tp
+    // not done), a speed above the planner's own zero (tp_types.h TP_VEL_EPSILON), or a joint homing
+    // (a homing sequence also stands still between its moves)
+    bool mv = !stat->motion.traj.inpos || std::fabs(stat->motion.traj.current_vel) > TP_VEL_EPSILON;
+    for (int j = 0; !mv && j < moving_joints; j++) mv = stat->motion.joint[j].homing;
+    uint64_t w = moving_word.load(std::memory_order_relaxed);
+    if (!w || (int)(w & 1) != (int)mv) moving_word.store(ts << 1 | (mv ? 1 : 0), std::memory_order_release);
     answer_cycle(stat);
 }
 
