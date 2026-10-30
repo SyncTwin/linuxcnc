@@ -54,10 +54,18 @@ normalized trapezoid s(t) in [0,1] with peak ds/dt = V = min maxv_i/|d_i| and
 d2s/dt2 = A = min maxa_i/|d_i| (d_i the member's distance), so member i gets
 velocity V*|d_i| and acceleration A*|d_i|, never over its own limits, and all
 start and stop together (from standstill; an aborting move from motion
-follows each member's own blend).  A Direct move ignores velocity, acceleration,
-deceleration and jerk (Part 4: it runs at the mechanism's limits); *direct-vel-factor*
-(0, 1], latched at its execute edge, scales V (the VelFactor of Part 4
-MC_GroupSetOverride, per move): a reduced-speed Direct move, e.g. ISO 10218-1 T1.
+follows each member's own blend).  A Direct move ignores velocity, deceleration and
+jerk (Part 4: it runs at the mechanism's limits); *direct-vel-factor* (0, 1], latched
+at its execute edge, scales V (the VelFactor of Part 4 MC_GroupSetOverride, per move):
+a reduced-speed Direct move, e.g. ISO 10218-1 T1.  *acceleration* > 0 on a Direct move,
+latched at its execute edge, is the bound of the TCP acceleration in mm/s^2 (a held
+item, ISO 10218-2: the motion must not shed the workpiece; KUKA $ACC_AXIS / FANUC ACC
+under a payload): the move's own AccFactor = that bound / the TCP acceleration of the
+move at the mechanism's limits.  Along the joint path p(s) (forward kinematics at
+PATH_SAMPLES pieces) the TCP acceleration of the trapezoid is at most
+|dp/ds|*A + |d2p/ds2|*V^2; V is lowered first only if the second term alone would take
+over half the bound, then A so the sum keeps under it; both scale the members alike, so
+they still start and stop together.  0 - the mechanism's limits.
 
 LINEAR MOVE: the flange point on a straight line (C interpolated with it;
 a pure turn of C runs on C, velocity then in deg/s) with a trapezoid of
@@ -108,7 +116,7 @@ pin in sint mode "0 MoveDirectAbsolute, 1 MoveLinearAbsolute";
 pin in sint coord "MC_COORD_SYSTEM: 0 ACS, 1 MCS, 2 PCS";
 pin in sint buffer_mode "MC_BUFFER_MODE: 0 mcAborting, 1 mcBuffered, 2..5 blending (run buffered)";
 pin in real velocity "Linear move: path velocity, mm/s";
-pin in real acceleration "Linear move: path acceleration, mm/s^2";
+pin in real acceleration "Linear move: path acceleration, mm/s^2; Direct move: TCP acceleration bound, mm/s^2 (0 = none), latched at execute";
 pin in real deceleration "Linear move: path deceleration, mm/s^2";
 pin in real jerk "Linear move: path jerk, mm/s^3";
 pin in real direct_vel_factor = 1.0 "Direct move: share (0, 1] of the synchronized V, latched at execute";
@@ -271,7 +279,7 @@ static int resolve(struct __comp_state *__comp_inst, const double *seed, double 
     int i, ok, e;
     if (buffer_mode < 0 || buffer_mode > 5) return E_UNKNOWN_MODE;
     if (mode != 0 && mode != 1) return E_UNKNOWN_MODE;
-    if (mode == 0 && !(direct_vel_factor > 0.0 && direct_vel_factor <= 1.0)) return E_INVALID_PARAMETERS;
+    if (mode == 0 && !(direct_vel_factor > 0.0 && direct_vel_factor <= 1.0 && acceleration >= 0.0)) return E_INVALID_PARAMETERS;
     if (mode == 1) {
         if (coord != 1) return E_COORD_SYSTEM;
         if (!(velocity > 0.0 && acceleration >= 0.0 && deceleration >= 0.0 && jerk == 0.0)) return E_INVALID_PARAMETERS;
@@ -311,10 +319,37 @@ static int resolve(struct __comp_state *__comp_inst, const double *seed, double 
     return best_d < 1e300 ? 0 : e;
 }
 
+/* The TCP of the joint path from the member setpoints to t[4], s in [0,1]: the largest |dp/ds| (*p1) and |d2p/ds2|
+ * (*p2), mm, by central differences of the forward kinematics at PATH_SAMPLES pieces. */
+#define PATH_SAMPLES 64   /* ПРЕДПОЛОЖЕНИЕ, не замер: 64 pieces resolve |dq/ds| of a 4R arm along one line */
+static void direct_tcp(struct __comp_state *__comp_inst, const double *t, double *p1, double *p2) {
+    struct geom gi;
+    double jf[EMCMOT_MAX_JOINTS] = {0}, x[PATH_SAMPLES + 1][3], h = 1.0 / PATH_SAMPLES, a, b, d1, d2;
+    EmcPose p = {{0, 0, 0}, 0, 0, 0, 0, 0, 0};
+    KINEMATICS_FORWARD_FLAGS ff = 0;
+    KINEMATICS_INVERSE_FLAGS fi = 0;
+    int n, i, k;
+    use_geometry(__comp_inst, &gi);
+    for (n = 0; n <= PATH_SAMPLES; n++) {
+        for (i = 0; i < 4; i++) jf[i] = joint_set(i) + n * h * (t[i] - joint_set(i));
+        kinematicsForward(jf, &p, &ff, &fi);
+        x[n][0] = p.tran.x; x[n][1] = p.tran.y; x[n][2] = p.tran.z;
+    }
+    *p1 = *p2 = 0.0;
+    for (n = 1; n < PATH_SAMPLES; n++) {
+        for (d1 = d2 = 0.0, k = 0; k < 3; k++) {
+            a = (x[n + 1][k] - x[n - 1][k]) / (2.0 * h); b = (x[n + 1][k] - 2.0 * x[n][k] + x[n - 1][k]) / (h * h);
+            d1 += a * a; d2 += b * b;
+        }
+        if (sqrt(d1) > *p1) *p1 = sqrt(d1);
+        if (sqrt(d2) > *p2) *p2 = sqrt(d2);
+    }
+}
+
 /* Synchronized Direct move to t[4] from the member setpoints (each member plans from its own pos-cmd): one normalized trapezoid for all, its peak
- * scaled by f (direct-vel-factor of the move). */
-static void issue_move(struct __comp_state *__comp_inst, const double *t, int id, double f) {
-    double V = 1e300, A = 1e300, dd;
+ * scaled by f (direct-vel-factor of the move); a_tcp > 0 bounds the TCP acceleration of the move (mm/s^2, the header). */
+static void issue_move(struct __comp_state *__comp_inst, const double *t, int id, double f, double a_tcp) {
+    double V = 1e300, A = 1e300, dd, p1, p2;
     int i;
     for (i = 0; i < 4; i++) {
         dd = fabs(t[i] - joint_set(i));
@@ -324,6 +359,11 @@ static void issue_move(struct __comp_state *__comp_inst, const double *t, int id
         }
     }
     V *= f;
+    if (a_tcp > 0.0 && V < 1e300) {
+        direct_tcp(__comp_inst, t, &p1, &p2);
+        if (p2 * V * V > 0.5 * a_tcp) V = sqrt(0.5 * a_tcp / p2);
+        if (p1 > 0.0 && (a_tcp - p2 * V * V) / p1 < A) A = (a_tcp - p2 * V * V) / p1;
+    }
     for (i = 0; i < 4; i++) {
         dd = fabs(t[i] - joint_set(i));
         tj[i] = t[i];
@@ -362,7 +402,6 @@ static int path_ik(struct __comp_state *__comp_inst, double f, double *out) {
 /* The mechanism's path acceleration (acceleration 0 = the mechanism's ceiling, as mc_axis's 0 = maxa): the least
  * maxa_i / |dq_i/ds| over PATH_SAMPLES pieces of the path; -1 if a piece has no inverse solution. */
 static void to_errorstop(struct __comp_state *__comp_inst, int id);
-#define PATH_SAMPLES 64   /* ПРЕДПОЛОЖЕНИЕ, не замер: 64 pieces resolve |dq/ds| of a 4R arm along one line */
 static double mech_acc(struct __comp_state *__comp_inst) {
     double best = 1e300, keep[4], qa[4], qb[4], h = 1.0 / PATH_SAMPLES, dqds;
     int n, i;
@@ -438,7 +477,7 @@ static void next_from_queue(struct __comp_state *__comp_inst) {
     q_valid = 0;
     if (q_id == (int)command_id) busy_set(1);
     if (q_mode == 1) start_linear(__comp_inst, q_p, q_tj, q_v, q_a, q_d, q_id);
-    else issue_move(__comp_inst, q_tj, q_id, q_f);
+    else issue_move(__comp_inst, q_tj, q_id, q_f, q_a);
 }
 
 /* The members' synchronized step ceiling is mc_axis's |sync-pos - pos-cmd| <= maxv*dt (error 10), checked
@@ -619,7 +658,7 @@ FUNCTION(_) {
                 busy_set(1); state_set(GS_MOVING);
                 if (mode == 1) { double p1[4] = {position_x, position_y, position_z, position_c};
                                  start_linear(__comp_inst, p1, t, velocity, acceleration, deceleration, seq); }
-                else issue_move(__comp_inst, t, seq, direct_vel_factor);
+                else issue_move(__comp_inst, t, seq, direct_vel_factor, acceleration);
             }
         }
     } else if (halt_edge) {
