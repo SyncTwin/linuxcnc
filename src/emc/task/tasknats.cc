@@ -435,7 +435,7 @@ bool immediate_type(NMLTYPE t)
 // The values and the checks are the Python linuxcnc.command's (emcmodule.cc), nothing more.
 std::string parse_cmd(size_t dev, const SparkplugB__Payload *pl, NCmd &c, bool &has_serial)
 {
-    const Metric *verb = nullptr, *jj = nullptr, *jv = nullptr, *jd = nullptr, *sn = nullptr;
+    const Metric *verb = nullptr, *jj = nullptr, *jv = nullptr, *jd = nullptr, *sn = nullptr, *av = nullptr;
     has_serial = false;
     for (size_t n = 0; n < pl->n_metrics; n++) {
         const Metric *m = pl->metrics[n];
@@ -446,6 +446,7 @@ std::string parse_cmd(size_t dev, const SparkplugB__Payload *pl, NCmd &c, bool &
         else if (dev == D_MOTION && nm == "jog/velocity") jv = m;
         else if (dev == D_MOTION && nm == "jog/distance") jd = m;
         else if (dev == D_MOTION && nm == "spindleoverride/spindle") sn = m;
+        else if (dev == D_MOTION && nm == "set_aout/value") av = m;
         else if (verb) return "one command per DCMD (" + std::string(verb->name) + " and " + nm + ")";
         else verb = m;
     }
@@ -487,7 +488,18 @@ std::string parse_cmd(size_t dev, const SparkplugB__Payload *pl, NCmd &c, bool &
         return "";
     }
     // motion
-    if (v == "home" || v == "unhome") {
+    if (v == "set_aout") {
+        double value = 0;
+        if (!metric_int(verb, i) || i < 0 || i >= EMCMOT_MAX_AIO)
+            return "set_aout: analog output index";
+        if (!av || !metric_real(av, value)) return "set_aout: set_aout/value finite number";
+        auto *m = new EMC_MOTION_SET_AOUT;
+        m->index = (unsigned char)i;
+        m->start = value;
+        m->end = value;
+        m->now = 1;
+        put(m);
+    } else if (v == "home" || v == "unhome") {
         if (!metric_int(verb, i) || i < -1 || i >= EMCMOT_MAX_JOINTS) return v + ": joint index, -1 = all";
         if (v == "home") { auto *m = new EMC_JOINT_HOME; m->joint = (int)i; put(m); }
         else { auto *m = new EMC_JOINT_UNHOME; m->joint = (int)i; put(m); }
