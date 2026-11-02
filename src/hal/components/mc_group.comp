@@ -221,6 +221,13 @@ variable double qc[6];     // member positions given this period
 variable int q_id;
 variable double q_tj[6];
 variable int l_flags;      // linear: the palletkins configuration (inverse flags) the path keeps
+variable double pq[6];     // 6R planning: the seed walked along the path
+variable double pq0[6];    // 6R planning: the path start (member setpoints)
+variable int p_n;          // 6R planning: path pieces solved
+variable double p_best;    // 6R planning: the mechanism's path acceleration so far
+variable double l_dq[6];   // 6R: |dq_i/ds| of the last step (deg/mm), the step bound of the next
+variable double l_a_req;   // 6R planning: acceleration / deceleration as commanded (0 = the mechanism's)
+variable double l_d_req;
 variable void *ghd;        // 6R: this instance's genserfuncs state (its `haldata`), swapped in before every call
 
 option default_personality 4;
@@ -557,7 +564,14 @@ static void start_linear(struct __comp_state *__comp_inst, const double *p1, con
     if (l_len == 0.0 && !GENSER) l_len = fabs(lp1[3] - lp0[3]);
     l_s = 0.0; l_v = 0.0; l_vmax = v;
     run = RUN_LIN; run_id = id;
-    if (a <= 0.0 || d <= 0.0 || GENSER) {   /* 6R: the pass also proves the path reachable off the wrist singularity */
+    if (GENSER) {   /* 6R: the path is proved (reachable, off the wrist singularity) over periods first: lin 5 */
+        for (i = 0; i < 6; i++) { pq[i] = pq0[i] = qc[i]; l_dq[i] = 0.0; }
+        p_n = 0; p_best = 1e300; l_a_req = a; l_d_req = d;
+        lin = 5; lin_wait = 0; lin_halt = 0;
+        if (id == (int)command_id) active_set(1);
+        return;
+    }
+    if (a <= 0.0 || d <= 0.0) {
         double m = mech_acc(__comp_inst);
         if (m < 0.0) { to_errorstop(__comp_inst, E_UNREACHABLE); return; }
         if (a <= 0.0) a = m;
@@ -614,9 +628,38 @@ static double step_ratio(struct __comp_state *__comp_inst, const double *qn, dou
 }
 
 /* One period of the Linear move (run == RUN_LIN). */
+/* 6R: path pieces solved in one period of planning (lin 5); the path is PATH_SAMPLES pieces.
+ * ПРЕДПОЛОЖЕНИЕ, не замер: 4 — ~4 Newton solves of 1..5 iterations, tens of us, well inside 30 % of 1 ms;
+ * planning then takes PATH_SAMPLES / 4 = 16 periods before the members enter sync. */
+#define PLAN_PER_PERIOD 4
+/* 6R: the share of a member's admissible step the predicted path step aims at (the joint path bends between
+ * periods; a step over it is solved once more, secant).  ПРЕДПОЛОЖЕНИЕ, не замер: 0.98. */
+#define LIN_STEP_AIM 0.98
+
 static void linear_step(struct __comp_state *__comp_inst, double dt) {
     double rem, vreq, vn, ds, ds0, qn[6], r;
     int i, k, all = 1, err;
+    if (lin == 5) {   /* 6R planning: PLAN_PER_PERIOD pieces of the path per period, the members still stand */
+        double h = 1.0 / PATH_SAMPLES, qb[6], dqds;
+        if (lin_halt) { lin = 0; end_run(__comp_inst, 0); return; }
+        for (k = 0; k < PLAN_PER_PERIOD && p_n < PATH_SAMPLES && l_len > 0.0; k++, p_n++) {
+            for (i = 0; i < 6; i++) qc[i] = pq[i];
+            if (path_ik(__comp_inst, (p_n + 1) * h, qb)) { for (i = 0; i < 6; i++) qc[i] = pq0[i]; to_errorstop(__comp_inst, E_UNREACHABLE); return; }
+            for (i = 0; i < 6; i++) {
+                dqds = fabs(qb[i] - pq[i]) / (h * l_len);
+                if (dqds > l_dq[i]) l_dq[i] = dqds;
+                if (dqds > 0.0 && joint_maxa(i) / dqds < p_best) p_best = joint_maxa(i) / dqds;
+                pq[i] = qb[i];
+            }
+        }
+        for (i = 0; i < 6; i++) qc[i] = pq0[i];
+        if (p_n < PATH_SAMPLES && l_len > 0.0) return;
+        l_acc = l_a_req > 0.0 ? l_a_req : p_best < 1e300 ? p_best : 1e300;
+        l_dec = l_d_req > 0.0 ? l_d_req : l_acc;
+        lin = 1; lin_wait = 0;
+        member_sync_set(1);
+        return;
+    }
     if (lin == 1) {   /* the members enter SynchronizedMotion */
         for (i = 0; i < NJ; i++) if (joint_state(i) != AX_SYNC) all = 0;
         if (all) lin = 2;
@@ -632,6 +675,13 @@ static void linear_step(struct __comp_state *__comp_inst, double dt) {
                         : (vreq > l_v - l_dec * dt ? vreq : l_v - l_dec * dt);
         ds = 0.5 * (l_v + vn) * dt;
         if (ds >= rem || (!lin_halt && rem <= 0.0)) ds = rem;
+        ds0 = ds;
+        if (GENSER) {   /* 6R: the step bound by the members' |dq/ds| of the last step, before its one solve */
+            double c;
+            for (i = 0; i < 6; i++) if (l_dq[i] > 0.0) {
+                c = joint_maxv(i) * dt * SYNC_STEP_FILL * LIN_STEP_AIM / l_dq[i]; if (c < ds) ds = c;
+            }
+        }
         if (l_len > 0.0) err = path_ik(__comp_inst, (l_s + ds) / l_len, qn);
         else { for (i = 0; i < NJ; i++) qn[i] = qc[i]; err = 0; }
         /* Velocity override by the joint limits (time scaling): the path stays, the step along it
@@ -641,14 +691,20 @@ static void linear_step(struct __comp_state *__comp_inst, double dt) {
          * the group aims strictly inside.  Secant shrink first (the step is ~linear in ds), then
          * bisection on [0, ds] (ds = 0 is the current position, always admissible), so the group
          * never hands a member a step it refuses, however curved the joint path is. */
-        ds0 = ds;
-        for (k = 0; !err && k < 8; k++) {
+        if (GENSER && l_len > 0.0) {
+            /* 6R: one solve a period.  The step is bounded before it is solved by the members' |dq/ds| of the
+             * last step (the path's largest from planning at first); a step still over a member's admissible
+             * step is solved once more, shrunk by its ratio (secant); the guard below takes the rest. */
+            if (!err && (r = step_ratio(__comp_inst, qn, dt)) > 1.0) { ds /= r; err = path_ik(__comp_inst, (l_s + ds) / l_len, qn); }
+            if (!err && ds > 0.0) for (i = 0; i < 6; i++) l_dq[i] = fabs(qn[i] - qc[i]) / ds;
+        }
+        for (k = 0; !GENSER && !err && k < 8; k++) {
             r = step_ratio(__comp_inst, qn, dt);
             if (r <= 1.0) break;
             ds /= r;
             err = path_ik(__comp_inst, (l_s + ds) / l_len, qn);
         }
-        if (!err && step_ratio(__comp_inst, qn, dt) > 1.0) {
+        if (!GENSER && !err && step_ratio(__comp_inst, qn, dt) > 1.0) {
             double lo = 0.0, hi = ds, qlo[6];
             for (i = 0; i < NJ; i++) qlo[i] = qc[i];
             for (k = 0; !err && k < 40; k++) {
