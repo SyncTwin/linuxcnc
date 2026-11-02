@@ -58,7 +58,7 @@ using halnats::Batch;
 
 namespace {
 
-enum Dev { D_TASK, D_MOTION, D_IO, D_CONFIG, D_INTERP, D_N };
+enum Dev { D_TASK, D_MOTION, D_IO, D_CONFIG, D_INTERP, D_NODE };
 const std::vector<std::string> dev_names = {"task", "motion", "io", "config", "interp"};
 
 struct Def {
@@ -134,6 +134,11 @@ double pose_get(const EmcPose &p, int k)
 
 void build_defs(int joints, int spindles, int dio, int aio)
 {
+    add(D_NODE, "cell/moving", DT_(Boolean), [joints](const EMC_STAT *s) {
+        bool moving = !s->motion.traj.inpos || std::abs(s->motion.traj.current_vel) > 0;
+        for (int j = 0; j < joints; j++) moving = moving || s->motion.joint[j].homing;
+        return I(moving ? 1 : 0);
+    });
     // task
     AI(D_TASK, "mode", s->task.mode);
     AI(D_TASK, "state", s->task.state);
@@ -583,7 +588,7 @@ void answer_cycle(const EMC_STAT *stat)
 
 void status_metric(Batch &b, size_t i, bool named, bool prefixed)
 {
-    std::string n = named ? (prefixed ? dev_names[defs[i].dev] + "/" + defs[i].name : defs[i].name) : std::string();
+    std::string n = named ? (prefixed && defs[i].dev != D_NODE ? dev_names[defs[i].dev] + "/" + defs[i].name : defs[i].name) : std::string();
     Metric &m = b.add(n, i + 1, named ? defs[i].dt : 0, mirror_ts[i]);
     halnats::set_value(&m, defs[i].dt, mirror[i]);
 }
@@ -655,6 +660,16 @@ struct TaskStatus : halnats::Owner {
         for (char ok : smirror_ok) if (!ok) return false;
         return true;
     }
+    void birth_node(Batch &b) override
+    {
+        for (size_t i = 0; i < defs.size(); i++)
+            if (defs[i].dev == D_NODE && mirror_ok[i]) { status_metric(b, i, true, false); dirty[i] = 0; }
+    }
+    void data_node(Batch &b) override
+    {
+        for (size_t i = 0; i < defs.size(); i++)
+            if (defs[i].dev == D_NODE && dirty[i]) { status_metric(b, i, false, false); dirty[i] = 0; }
+    }
     void birth(size_t d, Batch &b) override
     {
         for (size_t i = 0; i < defs.size(); i++)
@@ -691,7 +706,7 @@ struct TaskStatus : halnats::Owner {
     void snapshot(const std::string &want, Batch &b) override
     {
         for (size_t i = 0; i < defs.size(); i++)
-            if (mirror_ok[i] && (want.empty() || want == dev_names[defs[i].dev])) status_metric(b, i, true, true);
+            if (mirror_ok[i] && (want.empty() || (defs[i].dev != D_NODE && want == dev_names[defs[i].dev]))) status_metric(b, i, true, true);
         for (size_t k = 0; k < sdefs.size(); k++)
             if (smirror_ok[k] && (want.empty() || want == dev_names[sdefs[k].dev])) str_metric(b, k, true, true);
         if (want.empty() || want == "task") ev_last_all(b, true, true);

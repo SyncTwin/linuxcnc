@@ -65,6 +65,8 @@ struct Owner {
     virtual bool ready() const = 0;                          // every metric known: births may go
     virtual void birth(size_t dev, Batch &b) = 0;            // full metrics; marks them sent
     virtual void data(size_t dev, Batch &b) = 0;             // changes since the last birth/data
+    virtual void birth_node(Batch & /*b*/) {}                // optional owner facts on NBIRTH
+    virtual void data_node(Batch & /*b*/) {}                 // optional owner facts on NDATA
     virtual void snapshot(const std::string &want, Batch &b) = 0;   // names "<device>/<metric>"
     // DCMD spBv1//0.<group>.DCMD.<node>.<device> of an owner device that takes commands. Called on the
     // NATS delivery thread of that device's subscription, NOT under the node's lock (one thread per
