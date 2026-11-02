@@ -17,7 +17,20 @@ under src/ (src/ is on the include path of the tree's RT build).  Built alone
 with halcompile, palletkins.c sits next to this file (halcompile puts the
 component's directory on the include path).
 
-MEMBERS: four *mc_axis*(9) instances.  The group owns their motion inputs:
+PERSONALITY: 4 (the default) - the palletizer above; 6 - a 6R arm through the math of
+*genserkins* (src/emc/kinematics/genserfuncs.c, compiled in the same way, its state per
+instance): members 0..5 = J1..J6 (deg), coordinates X Y Z A B C as genserkins (A B C its
+RPY).  The DH table is pins of the instance, named as the genserkins module's
+(mc-group.N.kins.A-i / ALPHA-i / D-i / unrotate-i / max-iterations / last-iterations);
+theta-N is the joint zero of the table vs the member (the kinematics sees member +
+theta-N); the palletkins geometry pins are not made.  ACS: the six elements are the six
+members.  MCS: one Newton solve seeded by the start (genserkins picks no branch, the move
+stays in the start's); a Linear move keeps the orientation of its start (A B C other than
+it: 11) and interpolates X Y Z only; a pose with |J5| under *wrist-min* (deg, modulo 180)
+is unreachable (10) - the wrist singularity; a Linear move checks its whole path at its
+start (PATH_SAMPLES solves).  Load: loadrt mc_group count=2 personality=4,6.
+
+MEMBERS: four (personality 6: six) *mc_axis*(9) instances.  The group owns their motion inputs:
 joint-cmd-N -> mc_axis.N.position, joint-vel-N -> .velocity,
 joint-acc-N -> .acceleration, member-execute / member-halt / member-reset
 -> .execute / .halt / .reset of every member (one period pulses).  It reads
@@ -100,13 +113,15 @@ reset one period after it falls.  *actual-x* .. *actual-c* are the forward
 kinematics of joint-fb every period (MC_GroupReadActualPosition).
 """;
 
-pin in real shoulder_x "palletkins.shoulder-x";
-pin in real shoulder_z "palletkins.shoulder-z";
-pin in real upper "palletkins.upper";
-pin in real fore "palletkins.fore";
-pin in real flange_x "palletkins.flange-x";
-pin in real flange_y "palletkins.flange-y";
-pin in real flange_z "palletkins.flange-z";
+pin in real shoulder_x if personality != 6 "palletkins.shoulder-x";
+pin in real shoulder_z if personality != 6 "palletkins.shoulder-z";
+pin in real upper if personality != 6 "palletkins.upper";
+pin in real fore if personality != 6 "palletkins.fore";
+pin in real flange_x if personality != 6 "palletkins.flange-x";
+pin in real flange_y if personality != 6 "palletkins.flange-y";
+pin in real flange_z if personality != 6 "palletkins.flange-z";
+pin in real theta_#[6] if personality == 6 "6R: joint zero of the DH table vs the member's (deg): the kinematics sees member + theta-N";
+pin in real wrist_min = 1.0 if personality == 6 "6R: |J5| (deg, kinematics frame, modulo 180) under which a pose is refused as the wrist singularity (10)";
 
 pin in bool enable "MC_GroupEnable (1) / MC_GroupDisable (0)";
 pin in bool execute "rising edge: the move described by mode/coord/buffer-mode/position-*";
@@ -127,22 +142,22 @@ pin in real position_a "MC_POSITION.A, deg (ACS: member 3)";
 pin in real position_b "MC_POSITION.B, deg: must be 0";
 pin in real position_c "MC_POSITION.C, deg (ACS: must be 0)";
 
-pin in real joint_fb_#[4] "mc_axis.N.actual-position: MC_GroupReadActualPosition (actual-x..c)";
-pin in real joint_set_#[4] "mc_axis.N.commanded-position (mcSetValue): where a move of the group starts";
-pin in real joint_maxv_#[4] "= mc_axis.N.maxv";
-pin in real joint_maxa_#[4] "= mc_axis.N.maxa";
-pin in real joint_min_#[4] "= mc_axis.N.min-limit";
-pin in real joint_max_#[4] "= mc_axis.N.max-limit";
-pin in sint joint_state_#[4] "mc_axis.N.state";
-pin in uint joint_command_id_#[4] "mc_axis.N.command-id";
-pin in uint joint_done_id_#[4] "mc_axis.N.done-id";
-pin in uint joint_aborted_id_#[4] "mc_axis.N.aborted-id";
-pin in uint joint_failed_id_#[4] "mc_axis.N.failed-id";
+pin in real joint_fb_#[6 : 4 + 2 * ( personality == 6 )] "mc_axis.N.actual-position: MC_GroupReadActualPosition (actual-x..c)";
+pin in real joint_set_#[6 : 4 + 2 * ( personality == 6 )] "mc_axis.N.commanded-position (mcSetValue): where a move of the group starts";
+pin in real joint_maxv_#[6 : 4 + 2 * ( personality == 6 )] "= mc_axis.N.maxv";
+pin in real joint_maxa_#[6 : 4 + 2 * ( personality == 6 )] "= mc_axis.N.maxa";
+pin in real joint_min_#[6 : 4 + 2 * ( personality == 6 )] "= mc_axis.N.min-limit";
+pin in real joint_max_#[6 : 4 + 2 * ( personality == 6 )] "= mc_axis.N.max-limit";
+pin in sint joint_state_#[6 : 4 + 2 * ( personality == 6 )] "mc_axis.N.state";
+pin in uint joint_command_id_#[6 : 4 + 2 * ( personality == 6 )] "mc_axis.N.command-id";
+pin in uint joint_done_id_#[6 : 4 + 2 * ( personality == 6 )] "mc_axis.N.done-id";
+pin in uint joint_aborted_id_#[6 : 4 + 2 * ( personality == 6 )] "mc_axis.N.aborted-id";
+pin in uint joint_failed_id_#[6 : 4 + 2 * ( personality == 6 )] "mc_axis.N.failed-id";
 
-pin out real joint_cmd_#[4] "to mc_axis.N.position";
-pin out real joint_vel_#[4] "to mc_axis.N.velocity";
-pin out real joint_acc_#[4] "to mc_axis.N.acceleration";
-pin out real joint_sync_#[4] "to mc_axis.N.sync-pos (Linear move)";
+pin out real joint_cmd_#[6 : 4 + 2 * ( personality == 6 )] "to mc_axis.N.position";
+pin out real joint_vel_#[6 : 4 + 2 * ( personality == 6 )] "to mc_axis.N.velocity";
+pin out real joint_acc_#[6 : 4 + 2 * ( personality == 6 )] "to mc_axis.N.acceleration";
+pin out real joint_sync_#[6 : 4 + 2 * ( personality == 6 )] "to mc_axis.N.sync-pos (Linear move)";
 pin out bool member_sync "to mc_axis.N.sync-enable of every member (Linear move)";
 pin out bool member_execute "to mc_axis.N.execute of every member";
 pin out bool member_halt "to mc_axis.N.halt of every member";
@@ -165,6 +180,8 @@ pin out real actual_x;
 pin out real actual_y;
 pin out real actual_z;
 pin out real actual_c;
+pin out real actual_a if personality == 6 "6R: MC_GroupReadActualPosition A (deg)";
+pin out real actual_b if personality == 6 "6R: MC_GroupReadActualPosition B (deg)";
 
 variable int seq;          // last command number given out
 variable int owner;        // input of the newest command: 1 execute 2 halt 3 reset, 0 none
@@ -177,14 +194,14 @@ variable int ex_old;
 variable int halt_old;
 variable int reset_old;
 variable int fire;         // member pulse to raise next: 1 execute 2 halt 3 reset
-variable double tj[4];     // member targets of the running (last issued) move
-variable int inv[4];       // member takes part in the running command
-variable int learned[4];   // its command number is known
-variable unsigned cid0[4]; // member command-id when the pulse went out
-variable unsigned ours[4]; // member command number of the running command
+variable double tj[6];     // member targets of the running (last issued) move
+variable int inv[6];       // member takes part in the running command
+variable int learned[6];   // its command number is known
+variable unsigned cid0[6]; // member command-id when the pulse went out
+variable unsigned ours[6]; // member command number of the running command
 variable int q_valid;      // a buffered move waits
 variable int q_mode;       // its mode: 0 direct, 1 linear
-variable double q_p[4];    // linear: target X Y Z C
+variable double q_p[6];    // linear: target X Y Z C (6R: X Y Z A B C)
 variable double q_v;
 variable double q_a;
 variable double q_d;
@@ -192,18 +209,22 @@ variable double q_f;      // direct: its direct-vel-factor
 variable int lin;          // linear phase: 1 members entering sync, 2 path, 3 hold one period, 4 members stopping
 variable int lin_wait;     // periods spent in phase 1
 variable int lin_halt;     // MC_GroupHalt: decelerate the path to a stop
-variable double lp0[4];    // path start X Y Z C
-variable double lp1[4];    // path end
+variable double lp0[6];    // path start X Y Z C (6R: X Y Z A B C, A B C kept along the path)
+variable double lp1[6];    // path end
 variable double l_len;     // path length (mm, or deg of C for a pure turn)
 variable double l_s;       // path position
 variable double l_v;       // path velocity
 variable double l_vmax;
 variable double l_acc;
 variable double l_dec;
-variable double qc[4];     // member positions given this period
+variable double qc[6];     // member positions given this period
 variable int q_id;
-variable double q_tj[4];
+variable double q_tj[6];
 variable int l_flags;      // linear: the palletkins configuration (inverse flags) the path keeps
+variable void *ghd;        // 6R: this instance's genserfuncs state (its `haldata`), swapped in before every call
+
+option default_personality 4;
+option extra_setup yes;
 
 function _;
 ;;
@@ -231,6 +252,24 @@ function _;
 #else
 #include "palletkins.c"                   /* halcompile: next to this file */
 #endif
+/* 6R (personality 6): genserfuncs.c (the math of genserkins, not its switchkins wrapper genserkins.c) and the
+ * libposemath it calls, compiled in the same way.  Its one `static struct haldata *haldata` is pointed at this
+ * instance's (ghd) before every call, as `g` of palletkins.  Its rtapi_print on a non-converging inverse would
+ * print every IK of the path search in the RT log: silenced here (the outcome is the return value). */
+#pragma push_macro("rtapi_print")
+#pragma push_macro("error")   /* the pin `error` of this component; genserfuncs.c has a label of that name */
+#undef rtapi_print
+#undef error
+#define rtapi_print(...) ((void)0)
+#if __has_include("emc/kinematics/genserfuncs.c")
+#include "libposemath/gomath.c"
+#include "emc/kinematics/genserfuncs.c"
+#else
+#include "gomath.c"
+#include "genserfuncs.c"
+#endif
+#pragma pop_macro("error")
+#pragma pop_macro("rtapi_print")
 #pragma GCC visibility pop
 #pragma pop_macro("EXPORT_SYMBOL")
 #pragma pop_macro("MODULE_LICENSE")
@@ -267,15 +306,84 @@ static void use_geometry(struct __comp_state *__comp_inst, struct geom *gi) {
     g = gi;
 }
 
+#define NJ (personality == 6 ? 6 : 4)   /* members of the group */
+#define GENSER (personality == 6)
+
+EXTRA_SETUP() {
+    char pre[HAL_NAME_LEN + 1];
+    kparms kp = {0};
+    (void)extra_arg;
+    if (personality != 4 && personality != 6) return -EINVAL;
+    if (personality != 6) return 0;
+    rtapi_snprintf(pre, sizeof(pre), "%s.kins", prefix);
+    kp.halprefix = pre; kp.max_joints = 6;
+    if (genserKinematicsSetup(comp_id, "XYZABC", &kp)) return -ENOMEM;
+    ghd = haldata;   /* the pins genserKinematicsSetup made for this instance */
+    return 0;
+}
+
+/* The group's kinematics on member coordinates.  palletkins: X Y Z C into p (A = B = 0), its configuration in
+ * *fl.  6R: X Y Z A B C; the members are offset by theta-N into the DH table's frame. */
+static int kfwd(struct __comp_state *__comp_inst, const double *q, EmcPose *p, KINEMATICS_INVERSE_FLAGS *fl) {
+    double jt[EMCMOT_MAX_JOINTS] = {0};
+    KINEMATICS_FORWARD_FLAGS ff = 0;
+    KINEMATICS_INVERSE_FLAGS fi = 0;
+    int i;
+    if (GENSER) {
+        haldata = ghd; genser_kin_init();
+        for (i = 0; i < 6; i++) jt[i] = q[i] + theta(i);
+        return genserKinematicsForward(jt, p, &ff, fl ? fl : &fi);
+    } else {
+        struct geom gi;
+        for (i = 0; i < 4; i++) jt[i] = q[i];
+        use_geometry(__comp_inst, &gi);
+        return kinematicsForward(jt, p, &ff, fl ? fl : &fi);
+    }
+}
+
+/* Members for pose p into q, seeded by q (6R: Newton from the seed, the branch of the seed; palletkins: the
+ * configuration fl); 0 or -1 (no solution, or the 6R wrist within wrist-min of its singularity). */
+static int kinv(struct __comp_state *__comp_inst, const EmcPose *p, double *q, KINEMATICS_INVERSE_FLAGS fl) {
+    double jt[EMCMOT_MAX_JOINTS] = {0}, w;
+    KINEMATICS_FORWARD_FLAGS ff = 0;
+    int i;
+    if (GENSER) {
+        haldata = ghd;
+        for (i = 0; i < 6; i++) jt[i] = q[i] + theta(i);
+        if (genserKinematicsInverse(p, jt, &fl, &ff) != 0) return -1;
+        w = fabs(fmod(jt[4], 180.0)); if (w > 90.0) w = 180.0 - w;
+        if (w < wrist_min) return -1;
+        for (i = 0; i < 6; i++) q[i] = jt[i] - theta(i);
+    } else {
+        struct geom gi;
+        for (i = 0; i < 4; i++) jt[i] = q[i];
+        use_geometry(__comp_inst, &gi);
+        if (kinematicsInverse(p, jt, &fl, &ff) != 0) return -1;
+        for (i = 0; i < 4; i++) q[i] = jt[i];
+    }
+    return 0;
+}
+
+/* ПРЕДПОЛОЖЕНИЕ, не замер: 0.01 deg — the orientation a 6R Linear move keeps from its start: A B C commanded
+ * further from it are a reorientation (refused 11); far above the rounding of the forward RPY, far below a
+ * deliberate turn. */
+#define ORIENT_TOL_DEG 0.01
+static int orient_same(double a1, double b1, double c1, double a2, double b2, double c2) {
+    go_rpy r1 = {a1 * PM_PI / 180, b1 * PM_PI / 180, c1 * PM_PI / 180}, r2 = {a2 * PM_PI / 180, b2 * PM_PI / 180, c2 * PM_PI / 180};
+    go_quat u, v;
+    double dot;
+    go_rpy_quat_convert(&r1, &u); go_rpy_quat_convert(&r2, &v);
+    dot = fabs(u.s * v.s + u.x * v.x + u.y * v.y + u.z * v.z);
+    return dot >= cos(0.5 * ORIENT_TOL_DEG * PM_PI / 180);
+}
+
 /* The move's member targets into out[4] from the start seed[4]; 0 or a refusal code.  MCS: every palletkins
  * configuration (inverse flags) is solved, the nearest to seed within the members' soft limits wins (Direct); a
  * Linear move keeps the configuration of seed (its path cannot change it). */
 static int resolve(struct __comp_state *__comp_inst, const double *seed, double *out) {
-    struct geom gi;
-    double jt[EMCMOT_MAX_JOINTS] = {0}, d, best_d = 1e300;
+    double jt[6], d, best_d = 1e300;
     EmcPose p = {{0, 0, 0}, 0, 0, 0, 0, 0, 0};
-    KINEMATICS_FORWARD_FLAGS ff = 0;
-    KINEMATICS_INVERSE_FLAGS fi = 0, fl, fl_start = 0;
+    KINEMATICS_INVERSE_FLAGS fl, fl_start = 0;
     int i, ok, e;
     if (buffer_mode < 0 || buffer_mode > 5) return E_UNKNOWN_MODE;
     if (mode != 0 && mode != 1) return E_UNKNOWN_MODE;
@@ -284,31 +392,48 @@ static int resolve(struct __comp_state *__comp_inst, const double *seed, double 
         if (coord != 1) return E_COORD_SYSTEM;
         if (!(velocity > 0.0 && acceleration >= 0.0 && deceleration >= 0.0 && jerk == 0.0)) return E_INVALID_PARAMETERS;
     }
-    for (i = 0; i < 4; i++)
+    for (i = 0; i < NJ; i++)
         if (!(joint_maxv(i) > 0.0 && joint_maxa(i) > 0.0 && joint_max(i) > joint_min(i))) return E_INVALID_PARAMETERS;
     if (coord == 0) {
-        if (position_b != 0.0 || position_c != 0.0) return E_ORIENTATION;
-        out[0] = position_x; out[1] = position_y; out[2] = position_z; out[3] = position_a;
-        for (i = 0; i < 4; i++) if (out[i] < joint_min(i) || out[i] > joint_max(i)) return E_SOFT_LIMIT;
+        if (GENSER) {   /* 6R: the six elements are the six members */
+            out[3] = position_a; out[4] = position_b; out[5] = position_c;
+        } else {
+            if (position_b != 0.0 || position_c != 0.0) return E_ORIENTATION;
+            out[3] = position_a;
+        }
+        out[0] = position_x; out[1] = position_y; out[2] = position_z;
+        for (i = 0; i < NJ; i++) if (out[i] < joint_min(i) || out[i] > joint_max(i)) return E_SOFT_LIMIT;
         return 0;
     }
     if (coord == 2) return E_COORD_SYSTEM;
     if (coord != 1) return E_UNKNOWN_MODE;
+    if (GENSER) {
+        /* 6R: one Newton solve from the start (its branch: genserkins chooses none); a Linear move keeps the
+         * orientation of its start, A B C must be it */
+        if (mode == 1) {
+            EmcPose ps;
+            if (kfwd(__comp_inst, seed, &ps, 0)) return E_UNREACHABLE;
+            if (!orient_same(position_a, position_b, position_c, ps.a, ps.b, ps.c)) return E_ORIENTATION;
+            p.a = ps.a; p.b = ps.b; p.c = ps.c;
+        } else { p.a = position_a; p.b = position_b; p.c = position_c; }
+        p.tran.x = position_x; p.tran.y = position_y; p.tran.z = position_z;
+        for (i = 0; i < 6; i++) jt[i] = seed[i];
+        if (kinv(__comp_inst, &p, jt, 0)) return E_UNREACHABLE;
+        for (i = 0; i < 6; i++) { if (jt[i] < joint_min(i) || jt[i] > joint_max(i)) return E_SOFT_LIMIT; out[i] = jt[i]; }
+        return 0;
+    }
     if (!(upper > 0.0 && fore > 0.0)) return E_INVALID_PARAMETERS;
     if (position_a != 0.0 || position_b != 0.0) return E_ORIENTATION;
     p.tran.x = position_x; p.tran.y = position_y; p.tran.z = position_z; p.c = position_c;
-    use_geometry(__comp_inst, &gi);
     if (mode == 1) {   /* the configuration of the start: the forward kinematics reports it */
         EmcPose ps;
-        for (i = 0; i < 4; i++) jt[i] = seed[i];
-        kinematicsForward(jt, &ps, &ff, &fl_start);
+        kfwd(__comp_inst, seed, &ps, &fl_start);
     }
     e = E_UNREACHABLE;
     for (fl = 0; fl < 4; fl++) {
         if (mode == 1 && fl != fl_start) continue;
-        fi = fl;
         for (i = 0; i < 4; i++) jt[i] = seed[i];
-        if (kinematicsInverse(&p, jt, &fi, &ff) != 0) continue;
+        if (kinv(__comp_inst, &p, jt, fl) != 0) continue;
         e = E_SOFT_LIMIT;
         for (ok = 1, d = 0.0, i = 0; i < 4; i++) {
             if (jt[i] < joint_min(i) || jt[i] > joint_max(i)) ok = 0;
@@ -323,16 +448,12 @@ static int resolve(struct __comp_state *__comp_inst, const double *seed, double 
  * (*p2), mm, by central differences of the forward kinematics at PATH_SAMPLES pieces. */
 #define PATH_SAMPLES 64   /* ПРЕДПОЛОЖЕНИЕ, не замер: 64 pieces resolve |dq/ds| of a 4R arm along one line */
 static void direct_tcp(struct __comp_state *__comp_inst, const double *t, double *p1, double *p2) {
-    struct geom gi;
-    double jf[EMCMOT_MAX_JOINTS] = {0}, x[PATH_SAMPLES + 1][3], h = 1.0 / PATH_SAMPLES, a, b, d1, d2;
+    double jf[6], x[PATH_SAMPLES + 1][3], h = 1.0 / PATH_SAMPLES, a, b, d1, d2;
     EmcPose p = {{0, 0, 0}, 0, 0, 0, 0, 0, 0};
-    KINEMATICS_FORWARD_FLAGS ff = 0;
-    KINEMATICS_INVERSE_FLAGS fi = 0;
     int n, i, k;
-    use_geometry(__comp_inst, &gi);
     for (n = 0; n <= PATH_SAMPLES; n++) {
-        for (i = 0; i < 4; i++) jf[i] = joint_set(i) + n * h * (t[i] - joint_set(i));
-        kinematicsForward(jf, &p, &ff, &fi);
+        for (i = 0; i < NJ; i++) jf[i] = joint_set(i) + n * h * (t[i] - joint_set(i));
+        kfwd(__comp_inst, jf, &p, 0);
         x[n][0] = p.tran.x; x[n][1] = p.tran.y; x[n][2] = p.tran.z;
     }
     *p1 = *p2 = 0.0;
@@ -351,7 +472,7 @@ static void direct_tcp(struct __comp_state *__comp_inst, const double *t, double
 static void issue_move(struct __comp_state *__comp_inst, const double *t, int id, double f, double a_tcp) {
     double V = 1e300, A = 1e300, dd, p1, p2;
     int i;
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < NJ; i++) {
         dd = fabs(t[i] - joint_set(i));
         if (dd > 0.0) {
             if (joint_maxv(i) / dd < V) V = joint_maxv(i) / dd;
@@ -364,7 +485,7 @@ static void issue_move(struct __comp_state *__comp_inst, const double *t, int id
         if (p2 * V * V > 0.5 * a_tcp) V = sqrt(0.5 * a_tcp / p2);
         if (p1 > 0.0 && (a_tcp - p2 * V * V) / p1 < A) A = (a_tcp - p2 * V * V) / p1;
     }
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < NJ; i++) {
         dd = fabs(t[i] - joint_set(i));
         tj[i] = t[i];
         joint_cmd_set(i, t[i]);
@@ -379,23 +500,21 @@ static void issue_move(struct __comp_state *__comp_inst, const double *t, int id
 static void issue_members(struct __comp_state *__comp_inst, int what, int id, int only_errorstop) {
     int i;
     run = what; run_id = id; fire = what == RUN_HALT ? 2 : 3;
-    for (i = 0; i < 4; i++) inv[i] = !only_errorstop || joint_state(i) == AX_ERROR_STOP;
+    for (i = 0; i < NJ; i++) inv[i] = !only_errorstop || joint_state(i) == AX_ERROR_STOP;
 }
 
 /* Members at path fraction f (0..1) of the running Linear move, in its configuration l_flags; 0 or -1 (no solution). */
 static int path_ik(struct __comp_state *__comp_inst, double f, double *out) {
-    struct geom gi;
-    double jt[EMCMOT_MAX_JOINTS] = {0};
+    double jt[6];
     EmcPose p = {{0, 0, 0}, 0, 0, 0, 0, 0, 0};
-    KINEMATICS_FORWARD_FLAGS ff = 0;
-    KINEMATICS_INVERSE_FLAGS fi = l_flags;
     int i;
-    for (i = 0; i < 4; i++) jt[i] = qc[i];
+    for (i = 0; i < NJ; i++) jt[i] = qc[i];
     p.tran.x = lp0[0] + (lp1[0] - lp0[0]) * f; p.tran.y = lp0[1] + (lp1[1] - lp0[1]) * f;
-    p.tran.z = lp0[2] + (lp1[2] - lp0[2]) * f; p.c = lp0[3] + (lp1[3] - lp0[3]) * f;
-    use_geometry(__comp_inst, &gi);
-    if (kinematicsInverse(&p, jt, &fi, &ff) != 0) return -1;
-    for (i = 0; i < 4; i++) out[i] = jt[i];
+    p.tran.z = lp0[2] + (lp1[2] - lp0[2]) * f;
+    if (GENSER) { p.a = lp0[3]; p.b = lp0[4]; p.c = lp0[5]; }   /* the start's orientation, kept */
+    else p.c = lp0[3] + (lp1[3] - lp0[3]) * f;
+    if (kinv(__comp_inst, &p, jt, l_flags) != 0) return -1;
+    for (i = 0; i < NJ; i++) out[i] = jt[i];
     return 0;
 }
 
@@ -403,18 +522,18 @@ static int path_ik(struct __comp_state *__comp_inst, double f, double *out) {
  * maxa_i / |dq_i/ds| over PATH_SAMPLES pieces of the path; -1 if a piece has no inverse solution. */
 static void to_errorstop(struct __comp_state *__comp_inst, int id);
 static double mech_acc(struct __comp_state *__comp_inst) {
-    double best = 1e300, keep[4], qa[4], qb[4], h = 1.0 / PATH_SAMPLES, dqds;
+    double best = 1e300, keep[6], qa[6], qb[6], h = 1.0 / PATH_SAMPLES, dqds;
     int n, i;
-    for (i = 0; i < 4; i++) keep[i] = qa[i] = qc[i];
+    for (i = 0; i < NJ; i++) keep[i] = qa[i] = qc[i];
     for (n = 0; n < PATH_SAMPLES && l_len > 0.0; n++) {
         if (path_ik(__comp_inst, (n + 1) * h, qb)) { best = -1.0; break; }
-        for (i = 0; i < 4; i++) {
+        for (i = 0; i < NJ; i++) {
             dqds = fabs(qb[i] - qa[i]) / (h * l_len);
             if (dqds > 0.0 && joint_maxa(i) / dqds < best) best = joint_maxa(i) / dqds;
             qa[i] = qc[i] = qb[i];
         }
     }
-    for (i = 0; i < 4; i++) qc[i] = keep[i];
+    for (i = 0; i < NJ; i++) qc[i] = keep[i];
     return best;
 }
 
@@ -423,23 +542,22 @@ static double mech_acc(struct __comp_state *__comp_inst) {
  * starts at the setpoints (commanded-position), the value mc_axis checks each synchronized step against: from the
  * actual position the first step would be the members' following error (a carried load: Perekladka, pallet). */
 static void start_linear(struct __comp_state *__comp_inst, const double *p1, const double *t, double v, double a, double d, int id) {
-    struct geom gi;
-    double jf[EMCMOT_MAX_JOINTS] = {0}, dx, dy, dz;
+    double jf[6], dx, dy, dz;
     EmcPose p = {{0, 0, 0}, 0, 0, 0, 0, 0, 0};
-    KINEMATICS_FORWARD_FLAGS ff = 0;
     KINEMATICS_INVERSE_FLAGS fi = 0;
     int i;
-    for (i = 0; i < 4; i++) { qc[i] = jf[i] = joint_set(i); joint_sync_set(i, qc[i]); lp1[i] = p1[i]; tj[i] = t[i]; }
-    use_geometry(__comp_inst, &gi);
-    kinematicsForward(jf, &p, &ff, &fi);
+    for (i = 0; i < NJ; i++) { qc[i] = jf[i] = joint_set(i); joint_sync_set(i, qc[i]); tj[i] = t[i]; }
+    for (i = 0; i < 6; i++) lp1[i] = p1[i];
+    kfwd(__comp_inst, jf, &p, &fi);
     l_flags = fi;
-    lp0[0] = p.tran.x; lp0[1] = p.tran.y; lp0[2] = p.tran.z; lp0[3] = p.c;
+    lp0[0] = p.tran.x; lp0[1] = p.tran.y; lp0[2] = p.tran.z;
+    if (GENSER) { lp0[3] = p.a; lp0[4] = p.b; lp0[5] = p.c; } else lp0[3] = p.c;
     dx = lp1[0] - lp0[0]; dy = lp1[1] - lp0[1]; dz = lp1[2] - lp0[2];
     l_len = sqrt(dx * dx + dy * dy + dz * dz);
-    if (l_len == 0.0) l_len = fabs(lp1[3] - lp0[3]);
+    if (l_len == 0.0 && !GENSER) l_len = fabs(lp1[3] - lp0[3]);
     l_s = 0.0; l_v = 0.0; l_vmax = v;
     run = RUN_LIN; run_id = id;
-    if (a <= 0.0 || d <= 0.0) {
+    if (a <= 0.0 || d <= 0.0 || GENSER) {   /* 6R: the pass also proves the path reachable off the wrist singularity */
         double m = mech_acc(__comp_inst);
         if (m < 0.0) { to_errorstop(__comp_inst, E_UNREACHABLE); return; }
         if (a <= 0.0) a = m;
@@ -491,21 +609,21 @@ static void next_from_queue(struct __comp_state *__comp_inst) {
 static double step_ratio(struct __comp_state *__comp_inst, const double *qn, double dt) {
     double r = 0.0, st;
     int i;
-    for (i = 0; i < 4; i++) { st = fabs(qn[i] - qc[i]) / (joint_maxv(i) * dt * SYNC_STEP_FILL); if (st > r) r = st; }
+    for (i = 0; i < NJ; i++) { st = fabs(qn[i] - qc[i]) / (joint_maxv(i) * dt * SYNC_STEP_FILL); if (st > r) r = st; }
     return r;
 }
 
 /* One period of the Linear move (run == RUN_LIN). */
 static void linear_step(struct __comp_state *__comp_inst, double dt) {
-    double rem, vreq, vn, ds, ds0, qn[4], r;
+    double rem, vreq, vn, ds, ds0, qn[6], r;
     int i, k, all = 1, err;
     if (lin == 1) {   /* the members enter SynchronizedMotion */
-        for (i = 0; i < 4; i++) if (joint_state(i) != AX_SYNC) all = 0;
+        for (i = 0; i < NJ; i++) if (joint_state(i) != AX_SYNC) all = 0;
         if (all) lin = 2;
         else if (++lin_wait > 2) { to_errorstop(__comp_inst, E_MEMBER_FAILED); return; }
         if (lin == 1) return;
     }
-    if (lin >= 2) for (i = 0; i < 4; i++) if (lin < 4 && joint_state(i) != AX_SYNC) { to_errorstop(__comp_inst, E_MEMBER_FAILED); return; }
+    if (lin >= 2) for (i = 0; i < NJ; i++) if (lin < 4 && joint_state(i) != AX_SYNC) { to_errorstop(__comp_inst, E_MEMBER_FAILED); return; }
     if (lin == 2) {
         rem = l_len - l_s;
         vreq = lin_halt ? 0.0 : l_vmax;
@@ -514,7 +632,8 @@ static void linear_step(struct __comp_state *__comp_inst, double dt) {
                         : (vreq > l_v - l_dec * dt ? vreq : l_v - l_dec * dt);
         ds = 0.5 * (l_v + vn) * dt;
         if (ds >= rem || (!lin_halt && rem <= 0.0)) ds = rem;
-        err = l_len > 0.0 ? path_ik(__comp_inst, (l_s + ds) / l_len, qn) : (qn[0] = qc[0], qn[1] = qc[1], qn[2] = qc[2], qn[3] = qc[3], 0);
+        if (l_len > 0.0) err = path_ik(__comp_inst, (l_s + ds) / l_len, qn);
+        else { for (i = 0; i < NJ; i++) qn[i] = qc[i]; err = 0; }
         /* Velocity override by the joint limits (time scaling): the path stays, the step along it
          * shrinks until every member's step is within SYNC_STEP_FILL of its maxv*dt.  mc_axis refuses
          * a synchronized step over maxv*dt with no tolerance (error 10), and it compares in its own
@@ -530,33 +649,33 @@ static void linear_step(struct __comp_state *__comp_inst, double dt) {
             err = path_ik(__comp_inst, (l_s + ds) / l_len, qn);
         }
         if (!err && step_ratio(__comp_inst, qn, dt) > 1.0) {
-            double lo = 0.0, hi = ds, qlo[4];
-            for (i = 0; i < 4; i++) qlo[i] = qc[i];
+            double lo = 0.0, hi = ds, qlo[6];
+            for (i = 0; i < NJ; i++) qlo[i] = qc[i];
             for (k = 0; !err && k < 40; k++) {
                 double mid = 0.5 * (lo + hi);
                 err = path_ik(__comp_inst, (l_s + mid) / l_len, qn);
-                if (!err && step_ratio(__comp_inst, qn, dt) <= 1.0) { lo = mid; for (i = 0; i < 4; i++) qlo[i] = qn[i]; }
+                if (!err && step_ratio(__comp_inst, qn, dt) <= 1.0) { lo = mid; for (i = 0; i < NJ; i++) qlo[i] = qn[i]; }
                 else hi = mid;
             }
-            ds = lo; for (i = 0; i < 4; i++) qn[i] = qlo[i];
+            ds = lo; for (i = 0; i < NJ; i++) qn[i] = qlo[i];
         }
         if (err) { to_errorstop(__comp_inst, E_UNREACHABLE); return; }
         if (ds < ds0) { vn = 2.0 * ds / dt - l_v; if (vn < 0.0) vn = 0.0; }   /* the override slowed the path */
         /* Last guard, the members' contract: every step inside q_prev +- maxv*dt*SYNC_STEP_FILL.
          * After the search above it moves nothing (the step is already inside); it bounds the
          * path deviation by the same margin, never more. */
-        for (i = 0; i < 4; i++) {
+        for (i = 0; i < NJ; i++) {
             double lim = joint_maxv(i) * dt * SYNC_STEP_FILL;
             if (qn[i] > qc[i] + lim) qn[i] = qc[i] + lim;
             if (qn[i] < qc[i] - lim) qn[i] = qc[i] - lim;
         }
         l_s += ds; l_v = vn;
-        for (i = 0; i < 4; i++) { qc[i] = qn[i]; joint_sync_set(i, qn[i]); }
+        for (i = 0; i < NJ; i++) { qc[i] = qn[i]; joint_sync_set(i, qn[i]); }
         if (l_s >= l_len || (lin_halt && l_v == 0.0)) { lin = 3; lin_wait = 0; }
     } else if (lin == 3) {   /* the last position held one period (the members' velocity goes to 0), then released */
         if (++lin_wait >= 2) { member_sync_set(0); lin = 4; }
     } else if (lin == 4) {
-        for (i = 0; i < 4; i++) if (joint_state(i) != AX_STANDSTILL) all = 0;
+        for (i = 0; i < NJ; i++) if (joint_state(i) != AX_STANDSTILL) all = 0;
         if (all) { lin = 0; end_run(__comp_inst, 0); next_from_queue(__comp_inst); }
     }
 }
@@ -564,19 +683,16 @@ static void linear_step(struct __comp_state *__comp_inst, double dt) {
 FUNCTION(_) {
     int ex_edge = execute && !ex_old, halt_edge = halt && !halt_old, reset_edge = reset && !reset_old;
     int i, all, any_failed, any_aborted, any_axis_err = 0, e;
-    double t[4], seed[4];
-    struct geom gi;
-    double jf[EMCMOT_MAX_JOINTS] = {0};
+    double t[6], seed[6];
+    double jf[6];
     EmcPose p = {{0, 0, 0}, 0, 0, 0, 0, 0, 0};
-    KINEMATICS_FORWARD_FLAGS ff = 0;
-    KINEMATICS_INVERSE_FLAGS fi = 0;
     ex_old = execute; halt_old = halt; reset_old = reset;
 
     /* member pulses are one period long; a pulse waits one low period after the previous one */
     if (member_execute || member_halt || member_reset) {
         member_execute_set(0); member_halt_set(0); member_reset_set(0);
     } else if (fire) {
-        for (i = 0; i < 4; i++) {
+        for (i = 0; i < NJ; i++) {
             cid0[i] = joint_command_id(i); learned[i] = 0;
             if (fire == 1) inv[i] = 1;
         }
@@ -603,7 +719,7 @@ FUNCTION(_) {
     if (run == RUN_LIN) linear_step(__comp_inst, period * 1e-9);
     else if (run && !fire && !member_execute && !member_halt && !member_reset) {
         all = 1; any_failed = 0; any_aborted = 0;
-        for (i = 0; i < 4; i++) {
+        for (i = 0; i < NJ; i++) {
             if (!inv[i]) continue;
             if (!learned[i] && joint_command_id(i) != cid0[i]) { ours[i] = joint_command_id(i); learned[i] = 1; }
             if (!learned[i]) { all = 0; continue; }
@@ -620,7 +736,7 @@ FUNCTION(_) {
         }
     }
 
-    for (i = 0; i < 4; i++) if (joint_state(i) == AX_ERROR_STOP) any_axis_err = 1;
+    for (i = 0; i < NJ; i++) if (joint_state(i) == AX_ERROR_STOP) any_axis_err = 1;
 
     /* derived state */
     if (!enable) {
@@ -642,21 +758,23 @@ FUNCTION(_) {
             if (q_valid) cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;
             else if ((e = resolve(__comp_inst, tj, t))) cmd_err = e;
             else {
-                for (i = 0; i < 4; i++) q_tj[i] = t[i];
-                q_p[0] = position_x; q_p[1] = position_y; q_p[2] = position_z; q_p[3] = position_c;
+                for (i = 0; i < NJ; i++) q_tj[i] = t[i];
+                q_p[0] = position_x; q_p[1] = position_y; q_p[2] = position_z;
+                if (GENSER) { q_p[3] = position_a; q_p[4] = position_b; q_p[5] = position_c; } else q_p[3] = position_c;
                 q_mode = mode; q_v = velocity; q_a = acceleration; q_d = deceleration; q_f = direct_vel_factor;
                 q_id = seq; q_valid = 1; busy_set(1);
             }
         } else if (state == GS_MOVING && (mode == 1 || run == RUN_LIN)) {
             cmd_err = E_COMMAND_NOT_ALLOWED_IN_STATE;   /* a Linear move neither aborts nor is aborted by a move */
         } else {
-            for (i = 0; i < 4; i++) seed[i] = joint_set(i);
+            for (i = 0; i < NJ; i++) seed[i] = joint_set(i);
             if ((e = resolve(__comp_inst, seed, t))) cmd_err = e;
             else {
                 if (run) end_run(__comp_inst, 1);
                 if (q_valid) { aborted_id_set(q_id); q_valid = 0; }
                 busy_set(1); state_set(GS_MOVING);
-                if (mode == 1) { double p1[4] = {position_x, position_y, position_z, position_c};
+                if (mode == 1) { double p1[6] = {position_x, position_y, position_z, position_c, 0, 0};
+                                 if (GENSER) { p1[3] = position_a; p1[4] = position_b; p1[5] = position_c; }
                                  start_linear(__comp_inst, p1, t, velocity, acceleration, deceleration, seq); }
                 else issue_move(__comp_inst, t, seq, direct_vel_factor, acceleration);
             }
@@ -695,11 +813,11 @@ FUNCTION(_) {
     error_set(cmd_err != 0 || (state == GS_ERROR_STOP && !busy && !done));
     error_id_set(cmd_err ? cmd_err : state == GS_ERROR_STOP ? grp_err : 0);
 
-    use_geometry(__comp_inst, &gi);
-    for (i = 0; i < 4; i++) jf[i] = joint_fb(i);
-    kinematicsForward(jf, &p, &ff, &fi);
+    for (i = 0; i < NJ; i++) jf[i] = joint_fb(i);
+    kfwd(__comp_inst, jf, &p, 0);
     actual_x_set(p.tran.x);
     actual_y_set(p.tran.y);
     actual_z_set(p.tran.z);
     actual_c_set(p.c);
+    if (GENSER) { actual_a_set(p.a); actual_b_set(p.b); }
 }
