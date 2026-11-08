@@ -229,6 +229,8 @@ variable double pq[6];     // 6R planning: the seed walked along the path
 variable double pq0[6];    // 6R planning: the path start (member setpoints)
 variable int p_n;          // 6R planning: path pieces solved
 variable double p_best;    // 6R planning: the mechanism's path acceleration so far
+variable double p_dq[6];   // 6R planning: dq/ds of the last piece (signed), for the path's curvature
+variable double p_vc;      // 6R planning: the path speed the curvature allows (|d2q/ds2| v^2 within the share)
 variable double l_dq[6];   // 6R: |dq_i/ds| of the last step (deg/mm), the step bound of the next
 variable double l_a_req;   // 6R planning: acceleration / deceleration as commanded (0 = the mechanism's)
 variable double l_d_req;
@@ -610,7 +612,8 @@ static void start_linear(struct __comp_state *__comp_inst, const double *p1, con
     run = RUN_LIN; run_id = id;
     if (GENSER) {   /* 6R: the path is proved (reachable, off the wrist singularity) over periods first: lin 5 */
         for (i = 0; i < 6; i++) { pq[i] = pq0[i] = qc[i]; l_dq[i] = 0.0; }
-        p_n = 0; p_best = 1e300; l_a_req = a; l_d_req = d;
+        p_n = 0; p_best = 1e300; p_vc = 1e300; l_a_req = a; l_d_req = d;
+        for (i = 0; i < 6; i++) p_dq[i] = 0.0;
         lin = 5; lin_wait = 0; lin_halt = 0;
         if (id == (int)command_id) active_set(1);
         return;
@@ -679,6 +682,9 @@ static double step_ratio(struct __comp_state *__comp_inst, const double *qn, dou
 /* 6R: the share of a member's admissible step the predicted path step aims at (the joint path bends between
  * periods; a step over it is solved once more, secant).  ПРЕДПОЛОЖЕНИЕ, не замер: 0.98. */
 #define LIN_STEP_AIM 0.98
+/* 6R: the share of a member's maxa the path's acceleration takes (q' a), the rest for its bends (q'' v^2).
+ * ПРЕДПОЛОЖЕНИЕ, не замер: 0.5 — half and half; KR16 upA 833 mm: |q''| 18 rad/m^2 at 0.87 m/s is 14 rad/s^2 alone. */
+#define LIN_ACC_SHARE 0.5
 
 static void linear_step(struct __comp_state *__comp_inst, double dt) {
     double rem, vreq, vn, ds, ds0, qn[6], r;
@@ -694,17 +700,29 @@ static void linear_step(struct __comp_state *__comp_inst, double dt) {
                 limit_joint_set(m); to_errorstop(__comp_inst, E_SOFT_LIMIT); return;
             }
             for (i = 0; i < 6; i++) {
-                dqds = fabs(qb[i] - pq[i]) / (h * l_len);
+                /* a member's acceleration on the path: d2q/dt2 = q' a + q'' v^2; each term within its share of
+                 * maxa, so neither the path's acceleration nor its speed on a bend outruns a member */
+                double sq = (qb[i] - pq[i]) / (h * l_len), c;
+                dqds = fabs(sq);
                 if (dqds > l_dq[i]) l_dq[i] = dqds;
-                if (dqds > 0.0 && joint_maxa(i) / dqds < p_best) p_best = joint_maxa(i) / dqds;
+                if (dqds > 0.0 && LIN_ACC_SHARE * joint_maxa(i) / dqds < p_best) p_best = LIN_ACC_SHARE * joint_maxa(i) / dqds;
+                if (p_n > 0 && (c = fabs(sq - p_dq[i]) / (h * l_len)) > 0.0 && sqrt((1.0 - LIN_ACC_SHARE) * joint_maxa(i) / c) < p_vc)
+                    p_vc = sqrt((1.0 - LIN_ACC_SHARE) * joint_maxa(i) / c);
+                p_dq[i] = sq;
                 pq[i] = qb[i];
             }
         }
         for (i = 0; i < 6; i++) qc[i] = pq0[i];
         if (p_n < PATH_SAMPLES && l_len > 0.0) return;
         for (i = 0; i < 6; i++) tj[i] = pq[i];   /* the walked end of the line: the move's target, a buffered move's start */
-        l_acc = l_a_req > 0.0 ? l_a_req : p_best < 1e300 ? p_best : 1e300;
-        l_dec = l_d_req > 0.0 ? l_d_req : l_acc;
+        /* Acceleration / Deceleration of the command bound the path, the mechanism bounds it too (as a Direct
+         * move's): a TCP bound over the members' maxa was handed to them as is (KR16 ed2adbb7 upA under AHold:
+         * A2 -0.05 -> -2.67 rad/s in 40 ms, its peak torque, 0x8611) */
+        l_acc = p_best < 1e300 ? p_best : 1e300;
+        if (l_a_req > 0.0 && l_a_req < l_acc) l_acc = l_a_req;
+        l_dec = p_best < 1e300 ? p_best : 1e300;
+        if (l_d_req > 0.0 && l_d_req < l_dec) l_dec = l_d_req; else if (l_d_req <= 0.0 && l_a_req > 0.0 && l_a_req < l_dec) l_dec = l_a_req;
+        if (p_vc < l_vmax) l_vmax = p_vc;
         lin = 1; lin_wait = 0;
         member_sync_set(1);
         return;
