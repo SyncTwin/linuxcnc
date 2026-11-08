@@ -25,7 +25,8 @@ RPY).  The DH table is pins of the instance, named as the genserkins module's
 theta-N is the joint zero of the table vs the member (the kinematics sees member +
 theta-N); the palletkins geometry pins are not made.  ACS: the six elements are the six
 members.  MCS: one Newton solve seeded by the start (genserkins picks no branch, the move
-stays in the start's); a Direct move it refuses or lands off the limits is solved once more from the start with J1
+stays in the start's; each member the full turn nearest the seed, else inside its limits; a refusal 5
+names its member in *limit-joint*); a Direct move it refuses or lands off the limits is solved once more from the start with J1
 turned by the azimuth of the target from the start's TCP about the table's Z (the axis of
 J1); a Linear move keeps the orientation of its start (A B C other than it: 11), its branch
 and interpolates X Y Z only; a pose with |J5| under *wrist-min* (deg, modulo 180)
@@ -178,6 +179,7 @@ pin out uint active_id "number of the command the group executes now (a buffered
 pin out uint done_id;
 pin out uint aborted_id;
 pin out uint failed_id;
+pin out sint limit_joint "the member (1..N) a refusal 5 (soft limits) of the newest command names; 0 none";
 pin out real actual_x;
 pin out real actual_y;
 pin out real actual_z;
@@ -362,7 +364,17 @@ static int kinv(struct __comp_state *__comp_inst, const EmcPose *p, double *q, K
         if (genserKinematicsInverse(p, jt, &fl, &ff) != 0) return -1;
         w = fabs(fmod(jt[4], 180.0)); if (w > 90.0) w = 180.0 - w;
         if (w < wrist_min) return -1;
-        for (i = 0; i < 6; i++) q[i] = jt[i] - theta(i);
+        for (i = 0; i < 6; i++) {
+            /* Newton's angles are not wrapped: a far target lands a full turn (or more) off, the same pose
+             * (seed A2 -49.5 A5 112.5, Linear 833 mm: A2 -391.8 A5 410.8 for -31.8 50.8, refused 5).  A revolute
+             * member: the turn nearest the seed, else the one inside the member's limits. */
+            double v = jt[i] - theta(i), d = fmod(v - q[i], 360.0);
+            if (d > 180.0) d -= 360.0; else if (d < -180.0) d += 360.0;
+            v = q[i] + d;
+            if (v > joint_max(i) && v - 360.0 >= joint_min(i)) v -= 360.0;
+            else if (v < joint_min(i) && v + 360.0 <= joint_max(i)) v += 360.0;
+            q[i] = v;
+        }
     } else {
         struct geom gi;
         for (i = 0; i < 4; i++) jt[i] = q[i];
@@ -390,7 +402,7 @@ static int orient_same(double a1, double b1, double c1, double a2, double b2, do
 static int solve6(struct __comp_state *__comp_inst, const EmcPose *p, double *q) {
     int i;
     if (kinv(__comp_inst, p, q, 0)) return E_UNREACHABLE;
-    for (i = 0; i < 6; i++) if (q[i] < joint_min(i) || q[i] > joint_max(i)) return E_SOFT_LIMIT;
+    for (i = 0; i < 6; i++) if (q[i] < joint_min(i) || q[i] > joint_max(i)) { limit_joint_set(i + 1); return E_SOFT_LIMIT; }
     return 0;
 }
 
@@ -402,6 +414,7 @@ static int resolve(struct __comp_state *__comp_inst, const double *seed, double 
     EmcPose p = {{0, 0, 0}, 0, 0, 0, 0, 0, 0};
     KINEMATICS_INVERSE_FLAGS fl, fl_start = 0;
     int i, ok, e;
+    limit_joint_set(0);
     if (buffer_mode < 0 || buffer_mode > 5) return E_UNKNOWN_MODE;
     if (mode != 0 && mode != 1) return E_UNKNOWN_MODE;
     if (mode == 0 && !(direct_vel_factor > 0.0 && direct_vel_factor <= 1.0 && acceleration >= 0.0)) return E_INVALID_PARAMETERS;
@@ -419,7 +432,7 @@ static int resolve(struct __comp_state *__comp_inst, const double *seed, double 
             out[3] = position_a;
         }
         out[0] = position_x; out[1] = position_y; out[2] = position_z;
-        for (i = 0; i < NJ; i++) if (out[i] < joint_min(i) || out[i] > joint_max(i)) return E_SOFT_LIMIT;
+        for (i = 0; i < NJ; i++) if (out[i] < joint_min(i) || out[i] > joint_max(i)) { limit_joint_set(i + 1); return E_SOFT_LIMIT; }
         return 0;
     }
     if (coord == 2) return E_COORD_SYSTEM;
@@ -450,6 +463,7 @@ static int resolve(struct __comp_state *__comp_inst, const double *seed, double 
             e = solve6(__comp_inst, &p, jt);
         }
         if (e) return e;
+        limit_joint_set(0);   /* a retry that solved it: the first pass's member is not the outcome */
         for (i = 0; i < 6; i++) out[i] = jt[i];
         return 0;
     }
