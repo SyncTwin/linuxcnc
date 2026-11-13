@@ -26,9 +26,9 @@ theta-N is the joint zero of the table vs the member (the kinematics sees member
 theta-N); the palletkins geometry pins are not made.  ACS: the six elements are the six
 members.  MCS: one Newton solve seeded by the start (genserkins picks no branch, the move
 stays in the start's; each member the full turn nearest the seed, else inside its limits; a refusal 5
-names its member in *limit-joint*); a Direct move it refuses or lands off the limits is solved once more from the start with J1
-turned by the azimuth of the target from the start's TCP about the table's Z (the axis of
-J1); a Linear move keeps the orientation of its start (A B C other than it: 11), its branch
+names its member in *limit-joint*); a Direct target carries all six resolved joints (configuration-joint-N), not a seed;
+there is no azimuth retry or branch search. FK validates its pose and soft limits.
+A Linear move keeps the orientation of its start (A B C other than it: 11), its branch
 and interpolates X Y Z only, its target the end of the line walked piece by piece from the start (no jump); a pose with |J5| under *wrist-min* (deg, modulo 180)
 is unreachable (10) - the wrist singularity; a Linear move checks its whole path at its
 start (PATH_SAMPLES solves).  Load: loadrt mc_group count=2 personality=4,6.
@@ -50,11 +50,11 @@ COMMANDS (rising edges, numbered on command-id like mc_axis; resolved on
 done-id / aborted-id / failed-id): *execute* = a move to position-x..c
 (MC_POSITION X Y Z A B C) in *coord* (0 ACS: the elements 0..3 are the member
 positions, 4..5 must be 0; 1 MCS: through the inverse kinematics, A and B must
-be 0 - the flange is kept level; of the four configurations of palletkins
-(inverse flags: shoulder front/back, elbow up/down) a Direct move takes the one
-nearest to the move's start among those within the members' soft limits, a
-Linear move stays in the configuration it starts in; none reachable is 10,
-reachable only outside the limits is 5; 2 PCS: refused, no part frame yet) with *mode*
+be 0 - the flange is kept level; Direct MCS requires configuration-flags and configuration-joint-N from the plan. The
+resolved joints are verified by FK against Position and configuration-tolerance, then
+executed exactly, with no inverse solve or alternative branch. Full turns already live
+in the joints and Position C. Missing/inconsistent configuration is 14. Linear retains
+the configuration of the physical start; 2 PCS is refused, no part frame yet) with *mode*
 0 MC_MoveDirectAbsolute or 1 MC_MoveLinearAbsolute (MCS only) and
 *buffer-mode* 0 mcAborting / 1 mcBuffered (one move queued; 2..5 blending
 is not implemented: such a move runs buffered - it stops exactly at the
@@ -108,7 +108,7 @@ in this state, 5 member target outside its soft limits, 7 invalid geometry or
 member limits, 8 unknown or not implemented mode, 10 target unreachable (no
 inverse solution), 11 A/B not 0 (MCS) or elements 4..5 not 0 (ACS),
 12 coordinate system not supported (PCS), 13 a member failed (its error-id
-says why; the others are halted).
+says why; the others are halted), 14 missing or inconsistent planned configuration.
 
 ONE MULTIPLEXED FB, as mc_axis: the outputs belong to the newest command;
 Done, CommandAborted and a refusal Error stay while its input is held and are
@@ -127,6 +127,10 @@ pin in real theta_#[6] if personality == 6 "6R: joint zero of the DH table vs th
 pin in real wrist_min = 1.0 if personality == 6 "6R: |J5| (deg, kinematics frame, modulo 180) under which a pose is refused as the wrist singularity (10)";
 
 pin in bool enable "MC_GroupEnable (1) / MC_GroupDisable (0)";
+pin in sint configuration_flags = -1 "planned target configuration: -1 absent, palletkins 0..3, genserkins 0; Direct MCS requires it";
+pin in real configuration_joint_#[6] "resolved target joints from the plan (deg), not a seed";
+pin in real configuration_tolerance "FK verification enclosure in mm, supplied by the planning contract";
+
 pin in bool execute "rising edge: the move described by mode/coord/buffer-mode/position-*";
 pin in bool halt "rising edge: MC_GroupHalt";
 pin in bool reset "rising edge: MC_GroupReset";
@@ -297,6 +301,7 @@ function _;
 #define E_ORIENTATION 11
 #define E_COORD_SYSTEM 12
 #define E_MEMBER_FAILED 13
+#define E_CONFIGURATION 14
 
 #define GS_DISABLED 0
 #define GS_STANDBY 1
@@ -409,13 +414,12 @@ static int solve6(struct __comp_state *__comp_inst, const EmcPose *p, double *q)
 }
 
 /* The move's member targets into out[4] from the start seed[4]; 0 or a refusal code.  MCS: every palletkins
- * configuration (inverse flags) is solved, the nearest to seed within the members' soft limits wins (Direct); a
- * Linear move keeps the configuration of seed (its path cannot change it). */
+ * configuration is supplied by the plan (Direct); Linear keeps the configuration of seed. */
 static int resolve(struct __comp_state *__comp_inst, const double *seed, double *out) {
-    double jt[6], d, best_d = 1e300;
+    double jt[6];
     EmcPose p = {{0, 0, 0}, 0, 0, 0, 0, 0, 0};
-    KINEMATICS_INVERSE_FLAGS fl, fl_start = 0;
-    int i, ok, e;
+    KINEMATICS_INVERSE_FLAGS fl_start = 0;
+    int i;
     limit_joint_set(0);
     if (buffer_mode < 0 || buffer_mode > 5) return E_UNKNOWN_MODE;
     if (mode != 0 && mode != 1) return E_UNKNOWN_MODE;
@@ -439,62 +443,60 @@ static int resolve(struct __comp_state *__comp_inst, const double *seed, double 
     }
     if (coord == 2) return E_COORD_SYSTEM;
     if (coord != 1) return E_UNKNOWN_MODE;
-    if (GENSER) {
-        /* 6R: one Newton solve from the start (its branch: genserkins chooses none); a Linear move keeps the
-         * orientation of its start, A B C must be it */
-        if (mode == 1) {
-            EmcPose ps;
-            if (kfwd(__comp_inst, seed, &ps, 0)) return E_UNREACHABLE;
-            if (!orient_same(position_a, position_b, position_c, ps.a, ps.b, ps.c)) return E_ORIENTATION;
-            /* the target is not solved by one jump: Newton from the start lands a far target on another branch
-             * (KR16 ed2adbb7, 833 mm down: A2 off its limits; stepped along the line A2 -49.5 -> -30.8).  A Linear
-             * move keeps the configuration of its start (PLCopen; KUKA Status/Turn, FANUC CONFIG): the planning of
-             * start_linear (lin 5) walks the line by PATH_SAMPLES pieces, each seeded by the last, checks every
-             * piece against the members' limits (5, limit-joint) and makes its end the move's target. */
-            for (i = 0; i < 6; i++) out[i] = seed[i];
-            return 0;
-        } else { p.a = position_a; p.b = position_b; p.c = position_c; }
-        p.tran.x = position_x; p.tran.y = position_y; p.tran.z = position_z;
-        for (i = 0; i < 6; i++) jt[i] = seed[i];
-        e = solve6(__comp_inst, &p, jt);
-        if (e && mode == 0) {
-            /* Newton refused a far target, or landed off the limits: once more with J1 on the target's azimuth, the
-             * turn from the start's TCP (no theta-N, no arm side in it), into J1's limits by a full turn.  Direct
-             * only: a Linear path cannot change the branch.  Within max-iterations like the first pass. */
-            EmcPose ps;
-            if (kfwd(__comp_inst, seed, &ps, 0)) return E_UNREACHABLE;
-            d = fmod((atan2(p.tran.y, p.tran.x) - atan2(ps.tran.y, ps.tran.x)) * 180.0 / PM_PI, 360.0);
-            if (d > 180.0) d -= 360.0; else if (d < -180.0) d += 360.0;
-            for (i = 0; i < 6; i++) jt[i] = seed[i];
-            jt[0] += d;
-            if (jt[0] > joint_max(0)) jt[0] -= 360.0; else if (jt[0] < joint_min(0)) jt[0] += 360.0;
-            e = solve6(__comp_inst, &p, jt);
+    if (mode == 0) {
+        /* A Direct target carries its resolved joints. Never solve another configuration here.
+         * Full turns are already in the joints and Position C; do not normalize either. */
+        EmcPose got;
+        KINEMATICS_INVERSE_FLAGS got_flags = 0;
+        double dx, dy, dz;
+        if (configuration_flags < 0 || configuration_flags > (GENSER ? 0 : 3) ||
+                !isfinite(configuration_tolerance) || !(configuration_tolerance > 0.0)) return E_CONFIGURATION;
+        if (!isfinite(position_x) || !isfinite(position_y) || !isfinite(position_z) ||
+                !isfinite(position_a) || !isfinite(position_b) || !isfinite(position_c)) return E_CONFIGURATION;
+        for (i = 0; i < NJ; i++) {
+            out[i] = configuration_joint(i);
+            if (!isfinite(out[i])) return E_CONFIGURATION;
+            if (out[i] < joint_min(i) || out[i] > joint_max(i)) {
+                limit_joint_set(i + 1); return E_SOFT_LIMIT;
+            }
         }
-        if (e) return e;
-        limit_joint_set(0);   /* a retry that solved it: the first pass's member is not the outcome */
-        for (i = 0; i < 6; i++) out[i] = jt[i];
+        for (i = NJ; i < 6; i++) if (configuration_joint(i) != 0.0) return E_CONFIGURATION;
+        if (kfwd(__comp_inst, out, &got, &got_flags)) return E_UNREACHABLE;
+        dx = got.tran.x - position_x; dy = got.tran.y - position_y; dz = got.tran.z - position_z;
+        if (sqrt(dx * dx + dy * dy + dz * dz) > configuration_tolerance) return E_CONFIGURATION;
+        if (GENSER) {
+            if (!orient_same(got.a, got.b, got.c, position_a, position_b, position_c)) return E_CONFIGURATION;
+        } else {
+            if (position_a != 0.0 || position_b != 0.0) return E_ORIENTATION;
+            if (got_flags != (KINEMATICS_INVERSE_FLAGS)configuration_flags ||
+                    fabs(got.c - position_c) > ORIENT_TOL_DEG) return E_CONFIGURATION;
+        }
         return 0;
+    }
+    /* Linear retains the physical start configuration. No branch search. */
+    if (GENSER) {
+        EmcPose ps;
+        if (kfwd(__comp_inst, seed, &ps, 0)) return E_UNREACHABLE;
+        if (!orient_same(position_a, position_b, position_c, ps.a, ps.b, ps.c)) return E_ORIENTATION;
+        for (i = 0; i < 6; i++) out[i] = seed[i];
+        return 0;  /* start_linear walks the line from this exact seed */
     }
     if (!(upper > 0.0 && fore > 0.0)) return E_INVALID_PARAMETERS;
     if (position_a != 0.0 || position_b != 0.0) return E_ORIENTATION;
     p.tran.x = position_x; p.tran.y = position_y; p.tran.z = position_z; p.c = position_c;
-    if (mode == 1) {   /* the configuration of the start: the forward kinematics reports it */
+    {
         EmcPose ps;
-        kfwd(__comp_inst, seed, &ps, &fl_start);
+        if (kfwd(__comp_inst, seed, &ps, &fl_start)) return E_UNREACHABLE;
     }
-    e = E_UNREACHABLE;
-    for (fl = 0; fl < 4; fl++) {
-        if (mode == 1 && fl != fl_start) continue;
-        for (i = 0; i < 4; i++) jt[i] = seed[i];
-        if (kinv(__comp_inst, &p, jt, fl) != 0) continue;
-        e = E_SOFT_LIMIT;
-        for (ok = 1, d = 0.0, i = 0; i < 4; i++) {
-            if (jt[i] < joint_min(i) || jt[i] > joint_max(i)) ok = 0;
-            d += fabs(jt[i] - seed[i]);
+    for (i = 0; i < 4; i++) jt[i] = seed[i];
+    if (kinv(__comp_inst, &p, jt, fl_start)) return E_UNREACHABLE;
+    for (i = 0; i < 4; i++) {
+        if (jt[i] < joint_min(i) || jt[i] > joint_max(i)) {
+            limit_joint_set(i + 1); return E_SOFT_LIMIT;
         }
-        if (ok && d < best_d) { best_d = d; for (i = 0; i < 4; i++) out[i] = jt[i]; }
+        out[i] = jt[i];
     }
-    return best_d < 1e300 ? 0 : e;
+    return 0;
 }
 
 /* The TCP of the joint path from the member setpoints to t[4], s in [0,1]: the largest |dp/ds| (*p1) and |d2p/ds2|
