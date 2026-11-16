@@ -114,6 +114,12 @@ ONE MULTIPLEXED FB, as mc_axis: the outputs belong to the newest command;
 Done, CommandAborted and a refusal Error stay while its input is held and are
 reset one period after it falls.  *actual-x* .. *actual-c* are the forward
 kinematics of joint-fb every period (MC_GroupReadActualPosition).
+*set-x* .. *set-c* are the same forward kinematics of joint-set (mcSetValue),
+the group's current setpoint, not the final target of an unfinished move.
+Personality 6 also exposes actual-a/b and set-a/b.
+Source semantics: PLCopen Part 4 V2.0 Release for Comments (2025-11-18),
+section 9.14 MC_GroupReadPosition, mcSetValue vs mcActualValue; these HAL
+outputs reuse kfwd, not an additional position solver or motion command.
 """;
 
 pin in real shoulder_x if personality != 6 "palletkins.shoulder-x";
@@ -189,6 +195,12 @@ pin out real actual_z;
 pin out real actual_c;
 pin out real actual_a if personality == 6 "6R: MC_GroupReadActualPosition A (deg)";
 pin out real actual_b if personality == 6 "6R: MC_GroupReadActualPosition B (deg)";
+pin out real set_x "FK of joint-set: current setpoint X (mm)";
+pin out real set_y "FK of joint-set: current setpoint Y (mm)";
+pin out real set_z "FK of joint-set: current setpoint Z (mm)";
+pin out real set_c "FK of joint-set: current setpoint C (deg)";
+pin out real set_a if personality == 6 "6R: FK of joint-set A (deg)";
+pin out real set_b if personality == 6 "6R: FK of joint-set B (deg)";
 
 variable int seq;          // last command number given out
 variable int owner;        // input of the newest command: 1 execute 2 halt 3 reset, 0 none
@@ -940,4 +952,11 @@ FUNCTION(_) {
     actual_z_set(p.tran.z);
     actual_c_set(p.c);
     if (GENSER) { actual_a_set(p.a); actual_b_set(p.b); }
+    for (i = 0; i < NJ; i++) jf[i] = joint_set(i);
+    kfwd(__comp_inst, jf, &p, 0);
+    set_x_set(p.tran.x);
+    set_y_set(p.tran.y);
+    set_z_set(p.tran.z);
+    set_c_set(p.c);
+    if (GENSER) { set_a_set(p.a); set_b_set(p.b); }
 }
