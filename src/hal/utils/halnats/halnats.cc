@@ -95,6 +95,7 @@
 #include <optional>
 #include <set>
 #include <thread>
+#include <utility>
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -178,10 +179,12 @@ struct SImg { std::string master, slave; unsigned idx = 0, sub = 0; bool sgn = f
 std::vector<std::string> s_img_masters;          // scope_image rows; empty = no ring source
 int s_img_div = 0;                               // scope_image <divider> of the file (one for all masters)
 std::vector<SImg> simgs;
+using ScopeAddr = std::optional<std::pair<uint32_t, uint32_t>>;
+std::vector<ScopeAddr> i_addr;                   // under mx: attached catalog master index / slave position
 std::vector<char> i_on;                          // under mx: column in force (DCMD scope `columns`)
 std::atomic<int> s_div{1};                       // the divider in force (DCMD scope `divider`)
 long s_img_dt_ns = 0;                            // under mx: period x divider in force; 0 = ring not attached yet
-std::atomic<bool> scope_reborn{false};           // the scope DBIRTH again (dt_ns / columns changed)
+std::atomic<bool> scope_reborn{false};           // the scope DBIRTH again (dt_ns / columns / catalog changed)
 natsSubscription *dcmd_scope_sub = nullptr;
 std::string s_dcmd_scope;
 uint64_t hal_alias0 = 0, m_alias0 = 0, i_alias0 = 0;   // after the owner's 1..N: hal, sampler, scope
@@ -379,7 +382,8 @@ void hal_datas()
 // The birth of a scope-like device (sampler / scope): dt_ns + one array per column in force.
 // cts: per column the ms of its last row read (0 = nothing read yet)
 void dev_birth(size_t dev, uint64_t alias0, long dt, const std::vector<SCol> &cols, const std::vector<double> &last,
-               const std::vector<uint64_t> &cts, const std::vector<char> &on, bool as_float)
+               const std::vector<uint64_t> &cts, const std::vector<char> &on, bool as_float,
+               const std::vector<ScopeAddr> &addresses = {})
 {
     Batch b;
     Metric &m = b.add("dt_ns", alias0, HN_DT(Int64), 0);
@@ -388,12 +392,32 @@ void dev_birth(size_t dev, uint64_t alias0, long dt, const std::vector<SCol> &co
     // row read (report by exception skips a column standing at it); nothing read yet - declared, empty
     std::vector<double> d(cols.size());
     std::vector<float> f(cols.size());
+    // Sparkplug B 3.0 Metric.properties (field 9), PropertySet and PropertyValue.
+    // Fixed storage keeps every nested protobuf-c pointer alive through send().
+    std::vector<SparkplugB__Payload__PropertySet> props(cols.size(), SPARKPLUG_B__PAYLOAD__PROPERTY_SET__INIT);
+    std::vector<SparkplugB__Payload__PropertyValue> values(cols.size() * 2, SPARKPLUG_B__PAYLOAD__PROPERTY_VALUE__INIT);
+    std::vector<SparkplugB__Payload__PropertyValue *> value_ptrs(cols.size() * 2);
+    char *keys[] = {const_cast<char *>("master"), const_cast<char *>("pos")};
     for (size_t c = 0; c < cols.size(); c++) {
         if (c < on.size() && !on[c]) continue;   // off by DCMD scope `columns`: not declared
         bool have = c < cts.size() && cts[c] && c < last.size();
         Metric &mc = b.add(cols[c].key + "/" + cols[c].ch, alias0 + 1 + c,
                            as_float ? HN_DT(FloatArray) : HN_DT(DoubleArray), have ? cts[c] : 0);
         mc.value_case = HN_V(BYTES_VALUE); mc.bytes_value.len = 0; mc.bytes_value.data = nullptr;
+        const ScopeAddr addr = c < addresses.size() ? addresses[c] : ScopeAddr{};
+        for (size_t k = 0; k < 2; k++) {
+            auto &v = values[c * 2 + k];
+            v.has_type = 1; v.type = HN_DT(UInt32);
+            v.has_is_null = 1; v.is_null = !addr;
+            if (addr) {
+                v.value_case = SPARKPLUG_B__PAYLOAD__PROPERTY_VALUE__VALUE_INT_VALUE;
+                v.int_value = k ? addr->second : addr->first;
+            }
+            value_ptrs[c * 2 + k] = &v;
+        }
+        props[c].n_keys = props[c].n_values = 2;
+        props[c].keys = keys; props[c].values = value_ptrs.data() + c * 2;
+        mc.properties = &props[c];
         if (!have) continue;
         d[c] = last[c]; f[c] = (float)last[c];
         mc.bytes_value.len = as_float ? 4 : 8;
@@ -410,7 +434,7 @@ void sampler_birth()
 }
 void scope_birth()
 {
-    dev_birth(d_scope, i_alias0, s_img_dt_ns, icols, i_last, std::vector<uint64_t>(icols.size(), i_last_ts), i_on, i_float);
+    dev_birth(d_scope, i_alias0, s_img_dt_ns, icols, i_last, std::vector<uint64_t>(icols.size(), i_last_ts), i_on, i_float, i_addr);
 }
 
 // publisher health: errors of the broker connection and the last one; `le` keeps the string alive
@@ -1495,6 +1519,14 @@ void image_main(std::string master)
     std::vector<double> sent_last(ncol);
     std::vector<char> sent_ok(ncol, 0);
     bool said_wait = false;
+    auto addresses = [&](const std::vector<ScopeAddr> &next) {
+        std::lock_guard<std::mutex> g(mx);
+        for (int c = 0; c < ncol; c++) {
+            if (i_addr[gi[c]] == next[c]) continue;
+            i_addr[gi[c]] = next[c];
+            scope_reborn = true;
+        }
+    };
     while (running) {
         // ПРЕДПОЛОЖЕНИЕ, не замер: a 1 s poll for the segment, as sampler_main's for the sampler
         struct timespec w1 = {1, 0};
@@ -1535,6 +1567,7 @@ void image_main(std::string master)
         // the catalog: each column's entry by slave name + index:subindex
         const lcec_image_entry_t *ents = (const lcec_image_entry_t *)((const uint8_t *)base + m->entries_off);
         std::vector<ICol> ic(ncol);
+        std::vector<ScopeAddr> resolved(ncol);
         std::string missing;
         for (int c = 0; c < ncol; c++) {
             ic[c].seq = img[c].seq; ic[c].sgn = img[c].sgn;
@@ -1545,6 +1578,8 @@ void image_main(std::string master)
                     || strncmp(x.slave_name, img[c].slave.c_str(), LCEC_IMAGE_NAME_LEN)) continue;
                 if (x.byte_off + ((size_t)x.bit_pos + x.bit_length + 7) / 8 > m->image_len || x.bit_length > 64) break;
                 ic[c].found = true; ic[c].off = x.byte_off; ic[c].bit = x.bit_pos; ic[c].len = x.bit_length;
+                // XML names select the entry; only the live catalog supplies numeric addresses.
+                if (m->index >= 0) resolved[c] = std::make_pair((uint32_t)m->index, (uint32_t)x.slave_pos);
             }
             if (!ic[c].found) {
                 char a[96];
@@ -1552,6 +1587,7 @@ void image_main(std::string master)
                 missing += a;
             }
         }
+        addresses(resolved);
         const uint64_t period = m->period_ns, depth = m->depth;
         say(false, "%s: NATS scope: lcec image ring master %s, period %llu ns, depth %llu, %d columns%s%s\n", tag(),
             master.c_str(), (unsigned long long)period, (unsigned long long)depth, ncol,
@@ -1626,6 +1662,7 @@ void image_main(std::string master)
             }
         }
         flush();
+        addresses(std::vector<ScopeAddr>(ncol));
         say(false, "%s: NATS scope: lcec image ring master %s gone (reload / unload) - attaching again\n", tag(), master.c_str());
         shmdt(base);
     }
@@ -2180,6 +2217,7 @@ int start(const Config &c, int hal_comp_id, Owner *owner)
     s_ncmd = base + "NCMD." + cfg.node;
     s_dcmd_hal = base + "DCMD." + cfg.node + ".hal";
     s_dcmd_scope = base + "DCMD." + cfg.node + ".scope";
+    i_addr.assign(icols.size(), std::nullopt);
     i_on.assign(icols.size(), 1);
     i_last.assign(icols.size(), 0.0);
     s_div = s_img_div > 0 ? s_img_div : 1;
